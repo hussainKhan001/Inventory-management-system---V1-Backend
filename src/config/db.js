@@ -1,5 +1,6 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+import crypto from "crypto";
 import { logger } from "../utils/logger.js";
 import mongoose from "mongoose";
 import dotenv from "dotenv";

@@ -50,6 +50,7 @@ if (IS_PROD) {
   }
 }
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5e3;
 app.use(compression({ level: 6, threshold: 1024 }));
