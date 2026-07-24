@@ -39,6 +39,13 @@ const SettingsSchema = new Schema({
   stores:    { type: [String], default: [] },
   sites:     [{ siteName: String, siteCode: String }],
   gstRates:  { type: [String], default: ["0%", "5%", "12%", "18%", "28%"] },
+  companyBankDetails: {
+    accountHolderName: { type: String, default: "" },
+    bankName:          { type: String, default: "" },
+    accountNumber:     { type: String, default: "" },
+    ifscCode:          { type: String, default: "" },
+    branch:            { type: String, default: "" },
+  },
 
   // Procurement Task SLA Configuration
   slaConfig: {

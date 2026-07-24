@@ -793,6 +793,390 @@ router.post("/renumber", authenticate, async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+// ─── Helper: compute PO payment status from ALL GRNs + ALL receipt batches ───
+async function updatePOPaymentStatus(poId) {
+  if (!poId) return;
+  const allPOGRNs = await GRN.find({ poId });
+  let allPaid = allPOGRNs.length > 0;
+  let somePaid = false;
+  let totalPaid = 0;
+  const paymentHistory = [];
+
+  for (const g of allPOGRNs) {
+    // Root shipment
+    if (g.paymentStatus === "paid") {
+      somePaid = true;
+      totalPaid += g.payment?.amount || 0;
+      paymentHistory.push({ grnId: g.id, receiptIdx: null, shipmentLabel: "Shipment 1 (Initial)", amountPaid: g.payment?.amount || 0, date: g.payment?.date, mode: g.payment?.mode, utr: g.payment?.utr, ref: g.payment?.ref });
+    } else {
+      allPaid = false;
+    }
+    // Receipt batches
+    for (let i = 0; i < (g.receipts || []).length; i++) {
+      const r = g.receipts[i];
+      if (r.paymentStatus === "paid") {
+        somePaid = true;
+        totalPaid += r.payment?.amount || 0;
+        paymentHistory.push({ grnId: g.id, receiptIdx: i, shipmentLabel: `Shipment ${i + 2}`, amountPaid: r.payment?.amount || 0, date: r.payment?.date, mode: r.payment?.mode, utr: r.payment?.utr, ref: r.payment?.ref });
+      } else {
+        allPaid = false;
+      }
+    }
+  }
+
+  paymentHistory.sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0))
+                .forEach((h, i) => { h.installmentNo = i + 1; });
+
+  const newStatus = allPaid ? "paid" : somePaid ? "partial_paid" : "bill_verify";
+  await PurchaseOrder.updateOne({ id: poId }, { accountStatus: newStatus, totalPaid, paymentHistory });
+  broadcast({ type: "DATA_UPDATED", path: "purchase-orders" });
+}
+
+// PUT /grns/:id/bill-verify — Accounts verifies GRN root shipment bill
+router.put("/:id/bill-verify", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized: Access to verify bills is restricted." });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus === "paid") return res.status(400).json({ success: false, message: "This shipment is locked — already paid" });
+    const { remark, invoiceNo, invoiceAmount } = req.body;
+    if (!invoiceAmount || Number(invoiceAmount) <= 0) return res.status(400).json({ success: false, message: "Invoice amount is required and must be greater than 0" });
+    // Validate invoiceAmount does not exceed computed shipment value
+    if (grn.poId) {
+      const po = await PurchaseOrder.findOne({ id: grn.poId });
+      if (po) {
+        const grnValue = (grn.items || []).reduce((sum, gi) => {
+          const rcv = gi.received ?? 0;
+          const poItem = (po.items || []).find(pi =>
+            (pi.sku && gi.sku && pi.sku === gi.sku) ||
+            (pi.materialName || "").toLowerCase() === (gi.itemName || "").toLowerCase()
+          );
+          return sum + rcv * (gi.rate || poItem?.rate || 0);
+        }, 0);
+        if (grnValue > 0 && Number(invoiceAmount) > grnValue) {
+          return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${grnValue.toLocaleString("en-IN")}` });
+        }
+      }
+    }
+    grn.paymentStatus = "bill_verified";
+    grn.verifiedBy    = req.user.name;
+    grn.verifiedAt    = new Date().toISOString();
+    grn.invoiceAmount = Number(invoiceAmount);
+    if (remark)    grn.verifyRemark = remark;
+    if (invoiceNo) grn.invoiceNo    = invoiceNo;
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { paymentStatus: "bill_verified" });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN bill-verify error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/bill-approve — Accounts approves GRN bill for payment
+router.put("/:id/bill-approve", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized: Access to approve bills is restricted." });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus !== "bill_verified") return res.status(400).json({ success: false, message: "GRN must be verified before approval" });
+    grn.paymentStatus = "payment_pending";
+    grn.approvedBy = req.user.name;
+    grn.approvedAt = new Date().toISOString();
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { paymentStatus: "payment_pending" });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN bill-approve error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/payment — Root shipment paid, updates PO status
+router.put("/:id/payment", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized: Access to record payments is restricted." });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus === "paid") return res.status(400).json({ success: false, message: "This shipment is locked — already paid" });
+    if (grn.paymentStatus !== "payment_pending") return res.status(400).json({ success: false, message: "GRN must be approved before payment" });
+    const { amountPaid, date, mode, ref, utr, chequeNo, chequeDate, screenshotUrl, bank, fromCompany, toCompany, remarks, vendorBankDetails } = req.body;
+    if (!amountPaid || amountPaid <= 0) return res.status(400).json({ success: false, message: "Payment amount required" });
+    if (grn.invoiceAmount && Number(amountPaid) > grn.invoiceAmount) {
+      return res.status(400).json({ success: false, message: `Payment ₹${Number(amountPaid).toLocaleString("en-IN")} cannot exceed invoice amount ₹${grn.invoiceAmount.toLocaleString("en-IN")}` });
+    }
+    grn.paymentStatus = "paid";
+    grn.payment = { amount: amountPaid, date, mode, ref, utr, chequeNo, chequeDate, screenshotUrl, bank, fromCompany, toCompany, remarks, vendorBankDetails };
+    await grn.save();
+    await updatePOPaymentStatus(grn.poId);
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { paymentStatus: "paid", amount: amountPaid });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN payment error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PATCH /grns/:id/payment — Edit existing payment details (keeps status "paid")
+router.patch("/:id/payment", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus !== "paid") return res.status(400).json({ success: false, message: "Shipment is not paid yet" });
+    const { amountPaid, date, mode, ref, utr, chequeNo, chequeDate, screenshotUrl, bank, fromCompany, toCompany, remarks, vendorBankDetails } = req.body;
+    grn.payment = { amount: amountPaid ?? grn.payment?.amount, date, mode, ref, utr, chequeNo, chequeDate, screenshotUrl, bank, fromCompany, toCompany, remarks, vendorBankDetails };
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "payment_edited", amount: amountPaid });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// DELETE /grns/:id/payment — Revert payment back to payment_pending
+router.delete("/:id/payment", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus !== "paid") return res.status(400).json({ success: false, message: "Shipment is not paid" });
+    grn.paymentStatus = "payment_pending";
+    grn.payment = undefined;
+    await grn.save();
+    await updatePOPaymentStatus(grn.poId);
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "payment_reverted" });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/bill-verify-revert — Revert root shipment back to unpaid
+router.put("/:id/bill-verify-revert", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus === "paid") return res.status(400).json({ success: false, message: "Cannot revert a paid shipment — it is locked" });
+    grn.paymentStatus = "unpaid";
+    grn.verifiedBy = null; grn.verifiedAt = null; grn.verifyRemark = null;
+    grn.approvedBy = null; grn.approvedAt = null;
+    grn.invoiceAmount = null; grn.invoiceNo = null;
+    await grn.save();
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ─── Receipt-level payment routes (:idx = index in grn.receipts[]) ────────────
+
+// PUT /grns/:id/receipt/:idx/bill-verify
+router.put("/:id/receipt/:idx/bill-verify", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx, 10);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt batch not found" });
+    if (receipt.paymentStatus === "paid") return res.status(400).json({ success: false, message: "This shipment is locked — already paid" });
+    const { remark, invoiceNo, invoiceAmount } = req.body;
+    if (!invoiceAmount || Number(invoiceAmount) <= 0) return res.status(400).json({ success: false, message: "Invoice amount is required and must be greater than 0" });
+    // Validate invoiceAmount does not exceed computed receipt shipment value
+    if (grn.poId) {
+      const po = await PurchaseOrder.findOne({ id: grn.poId });
+      if (po) {
+        const receiptValue = (receipt.items || []).reduce((sum, ri) => {
+          const rcv = ri.received ?? 0;
+          const poItem = (po.items || []).find(pi =>
+            (pi.sku && ri.sku && pi.sku === ri.sku) ||
+            (pi.materialName || "").toLowerCase() === (ri.itemName || "").toLowerCase()
+          );
+          // Fall back to root GRN item rate if available
+          const rootItem = (grn.items || []).find(gi =>
+            (gi.sku && ri.sku && gi.sku === ri.sku) ||
+            (gi.itemName || "").toLowerCase() === (ri.itemName || "").toLowerCase()
+          );
+          return sum + rcv * (poItem?.rate || rootItem?.rate || 0);
+        }, 0);
+        if (receiptValue > 0 && Number(invoiceAmount) > receiptValue) {
+          return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${receiptValue.toLocaleString("en-IN")}` });
+        }
+      }
+    }
+    grn.receipts[idx].paymentStatus = "bill_verified";
+    grn.receipts[idx].verifiedBy    = req.user.name;
+    grn.receipts[idx].verifiedAt    = new Date().toISOString();
+    grn.receipts[idx].invoiceAmount = Number(invoiceAmount);
+    if (remark)    grn.receipts[idx].verifyRemark = remark;
+    if (invoiceNo) grn.receipts[idx].invoiceNo    = invoiceNo;
+    grn.markModified("receipts");
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_bill_verified", receiptIdx: idx });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/receipt/:idx/bill-approve
+router.put("/:id/receipt/:idx/bill-approve", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx, 10);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt batch not found" });
+    if (receipt.paymentStatus === "paid") return res.status(400).json({ success: false, message: "This shipment is locked — already paid" });
+    if (receipt.paymentStatus !== "bill_verified") return res.status(400).json({ success: false, message: "Receipt must be verified before approval" });
+    grn.receipts[idx].paymentStatus = "payment_pending";
+    grn.receipts[idx].approvedBy    = req.user.name;
+    grn.receipts[idx].approvedAt    = new Date().toISOString();
+    grn.markModified("receipts");
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_bill_approved", receiptIdx: idx });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/receipt/:idx/payment
+router.put("/:id/receipt/:idx/payment", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx, 10);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt batch not found" });
+    if (receipt.paymentStatus === "paid") return res.status(400).json({ success: false, message: "This shipment is locked — already paid" });
+    if (receipt.paymentStatus !== "payment_pending") return res.status(400).json({ success: false, message: "Receipt must be approved before payment" });
+    const { amountPaid, date, mode, ref, utr, chequeNo, chequeDate, screenshotUrl, bank, fromCompany, toCompany, remarks, vendorBankDetails } = req.body;
+    if (!amountPaid || amountPaid <= 0) return res.status(400).json({ success: false, message: "Payment amount required" });
+    if (receipt.invoiceAmount && Number(amountPaid) > receipt.invoiceAmount) {
+      return res.status(400).json({ success: false, message: `Payment ₹${Number(amountPaid).toLocaleString("en-IN")} cannot exceed invoice amount ₹${receipt.invoiceAmount.toLocaleString("en-IN")}` });
+    }
+    grn.receipts[idx].paymentStatus = "paid";
+    grn.receipts[idx].payment = { amount: amountPaid, date, mode, ref, utr, chequeNo, chequeDate, screenshotUrl, bank, fromCompany, toCompany, remarks, vendorBankDetails };
+    grn.markModified("receipts");
+    await grn.save();
+    await updatePOPaymentStatus(grn.poId);
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_paid", receiptIdx: idx, amount: amountPaid });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PATCH /grns/:id/receipt/:idx/payment — Edit existing receipt payment details
+router.patch("/:id/receipt/:idx/payment", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx, 10);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt batch not found" });
+    if (receipt.paymentStatus !== "paid") return res.status(400).json({ success: false, message: "Receipt is not paid yet" });
+    const { amountPaid, date, mode, ref, utr, chequeNo, chequeDate, screenshotUrl, bank, fromCompany, toCompany, remarks, vendorBankDetails } = req.body;
+    grn.receipts[idx].payment = { amount: amountPaid ?? receipt.payment?.amount, date, mode, ref, utr, chequeNo, chequeDate, screenshotUrl, bank, fromCompany, toCompany, remarks, vendorBankDetails };
+    grn.markModified("receipts");
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_payment_edited", receiptIdx: idx });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// DELETE /grns/:id/receipt/:idx/payment — Revert receipt payment back to payment_pending
+router.delete("/:id/receipt/:idx/payment", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx, 10);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt batch not found" });
+    if (receipt.paymentStatus !== "paid") return res.status(400).json({ success: false, message: "Receipt is not paid" });
+    grn.receipts[idx].paymentStatus = "payment_pending";
+    grn.receipts[idx].payment = undefined;
+    grn.markModified("receipts");
+    await grn.save();
+    await updatePOPaymentStatus(grn.poId);
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_payment_reverted", receiptIdx: idx });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/receipt/:idx/bill-verify-revert
+router.put("/:id/receipt/:idx/bill-verify-revert", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx, 10);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt batch not found" });
+    if (receipt.paymentStatus === "paid") return res.status(400).json({ success: false, message: "Cannot revert a paid shipment — it is locked" });
+    grn.receipts[idx].paymentStatus = "unpaid";
+    grn.receipts[idx].verifiedBy    = null;
+    grn.receipts[idx].verifiedAt    = null;
+    grn.receipts[idx].verifyRemark  = null;
+    grn.receipts[idx].approvedBy    = null;
+    grn.receipts[idx].approvedAt    = null;
+    grn.receipts[idx].invoiceAmount = null;
+    grn.receipts[idx].invoiceNo     = null;
+    grn.markModified("receipts");
+    await grn.save();
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 var stdin_default = router;
 export {
   stdin_default as default

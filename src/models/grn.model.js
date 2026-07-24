@@ -18,6 +18,27 @@ const GRNReceiptItemSchema = new Schema({
   images:   [String],
 }, { _id: false });
 
+const GRNPaymentSchema = new Schema({
+  amount:       Number,
+  date:         String,
+  mode:         String,
+  ref:          String,
+  utr:          String,
+  chequeNo:     String,
+  chequeDate:   String,
+  screenshotUrl: String,
+  bank:         String,
+  fromCompany:  String,
+  toCompany:    String,
+  remarks:      String,
+  vendorBankDetails: {
+    accountHolder: String,
+    bankName:      String,
+    accountNo:     String,
+    branchIFSC:    String,
+  },
+}, { _id: false });
+
 const GRNReceiptSchema = new Schema({
   date:          String,
   challan:       String,
@@ -27,6 +48,16 @@ const GRNReceiptSchema = new Schema({
   challanPhotos: [String],
   personPhotos:  [String],
   items:         [GRNReceiptItemSchema],
+  // Per-receipt payment tracking
+  paymentStatus: { type: String, enum: ["unpaid", "bill_verified", "payment_pending", "paid"], default: "unpaid" },
+  invoiceNo:     String,
+  invoiceAmount: Number,
+  verifiedBy:    String,
+  verifiedAt:    String,
+  verifyRemark:  String,
+  approvedBy:    String,
+  approvedAt:    String,
+  payment:       GRNPaymentSchema,
 }, { _id: false });
 
 const GRNSchema = new Schema({
@@ -50,6 +81,16 @@ const GRNSchema = new Schema({
   personName:         String,
   personPhotoUrl:     String,
   personPhotos:       [String],
+  // Payment tracking (Accounts)
+  paymentStatus:      { type: String, enum: ["unpaid", "bill_verified", "payment_pending", "paid"], default: "unpaid" },
+  invoiceNo:          String,
+  invoiceAmount:      Number,
+  verifiedBy:         String,
+  verifiedAt:         String,
+  verifyRemark:       String,
+  approvedBy:         String,
+  approvedAt:         String,
+  payment:            GRNPaymentSchema,
 }, { timestamps: true });
 
 GRNSchema.index({ poId: 1 });
