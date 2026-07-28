@@ -851,11 +851,16 @@ router.put("/:id/bill-verify", authenticate, async (req, res) => {
           const rcv = gi.received ?? 0;
           const poItem = (po.items || []).find(pi =>
             (pi.sku && gi.sku && pi.sku === gi.sku) ||
-            (pi.materialName || "").toLowerCase() === (gi.itemName || "").toLowerCase()
+            (pi.itemName || "").toLowerCase() === (gi.itemName || "").toLowerCase()
           );
-          return sum + rcv * (gi.rate || poItem?.rate || 0);
+          const rate = gi.rate || poItem?.rate || 0;
+          const gstPct = gi.gstPct ?? poItem?.gstPct ?? 0;
+          const gstType = gi.gstType || poItem?.gstType || "Exclusive";
+          const base = rcv * rate;
+          const total = gstType === "Exclusive" ? base * (1 + gstPct / 100) : base;
+          return sum + total;
         }, 0);
-        if (grnValue > 0 && Number(invoiceAmount) > grnValue) {
+        if (grnValue > 0 && Number(invoiceAmount) > grnValue + 0.5) {
           return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${grnValue.toLocaleString("en-IN")}` });
         }
       }
@@ -1012,16 +1017,23 @@ router.put("/:id/receipt/:idx/bill-verify", authenticate, async (req, res) => {
           const rcv = ri.received ?? 0;
           const poItem = (po.items || []).find(pi =>
             (pi.sku && ri.sku && pi.sku === ri.sku) ||
-            (pi.materialName || "").toLowerCase() === (ri.itemName || "").toLowerCase()
+            (pi.itemName || "").toLowerCase() === (ri.itemName || "").toLowerCase()
           );
           // Fall back to root GRN item rate if available
           const rootItem = (grn.items || []).find(gi =>
             (gi.sku && ri.sku && gi.sku === ri.sku) ||
             (gi.itemName || "").toLowerCase() === (ri.itemName || "").toLowerCase()
           );
-          return sum + rcv * (poItem?.rate || rootItem?.rate || 0);
+          const rate = poItem?.rate || rootItem?.rate || 0;
+          // Neither the receipt nor the root GRN item schema stores GST — the PO line item
+          // is the only place it's tracked, same as the frontend's calculation.
+          const gstPct = poItem?.gstPct ?? 0;
+          const gstType = poItem?.gstType || "Exclusive";
+          const base = rcv * rate;
+          const total = gstType === "Exclusive" ? base * (1 + gstPct / 100) : base;
+          return sum + total;
         }, 0);
-        if (receiptValue > 0 && Number(invoiceAmount) > receiptValue) {
+        if (receiptValue > 0 && Number(invoiceAmount) > receiptValue + 0.5) {
           return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${receiptValue.toLocaleString("en-IN")}` });
         }
       }

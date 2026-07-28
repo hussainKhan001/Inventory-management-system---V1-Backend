@@ -111,6 +111,17 @@ const POSchema = new Schema({
   },
   paymentHistory: { type: [Schema.Types.Mixed], default: undefined },
   totalPaid: { type: Number, default: 0 },
+  // Multi-level payment approval chain (AGM -> GM -> Director) — Mixed because the exact
+  // shape (level, role, label, status, approvedBy, approvedAt, remark) is assembled entirely
+  // on the frontend; these fields were previously missing from the schema, which meant
+  // Mongoose silently dropped them on every save (Object.assign + save() only persists
+  // schema-declared paths) — approvals looked like they worked in the UI until a refresh,
+  // then reverted because nothing had actually been written to the database.
+  paymentApprovals: { type: [Schema.Types.Mixed], default: undefined },
+  pendingPaymentData: { type: Schema.Types.Mixed, default: undefined },
+  paymentInitiatedBy: String,
+  paymentInitiatedAt: String,
+  paymentRejectionReason: String,
   auditTrail: [Schema.Types.Mixed],
   // Cancellation
   cancelNote:  String,

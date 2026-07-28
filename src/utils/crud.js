@@ -239,7 +239,17 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
               if (isApprovalL3 && cfg.approvers.l3Id && cfg.approvers.l3Id === uid) allowed = true;
             }
           }
-          if (!allowed && isAccountUpdate && (req.user.role === "Accountant" || req.user.role === "Finance Manager" || await serverHasPermission(req.user, "APPROVE_PURCHASE_ORDER_BILL") || await serverHasPermission(req.user, "VERIFY_BILL") || await serverHasPermission(req.user, "APPROVE_BILL"))) allowed = true;
+          if (!allowed && isAccountUpdate && (
+            req.user.role === "Accountant" || req.user.role === "Finance Manager"
+            || await serverHasPermission(req.user, "APPROVE_PURCHASE_ORDER_BILL")
+            || await serverHasPermission(req.user, "VERIFY_BILL")
+            || await serverHasPermission(req.user, "APPROVE_BILL")
+            || await serverHasPermission(req.user, "MAKE_PAYMENT")
+            || await serverHasPermission(req.user, "APPROVE_PAYMENT_AGM")
+            || await serverHasPermission(req.user, "APPROVE_PAYMENT_GM")
+            || await serverHasPermission(req.user, "APPROVE_PAYMENT_DIRECTOR")
+            || await serverHasPermission(req.user, "PHYSICAL_CHECK_PAYMENT")
+          )) allowed = true;
           if (!allowed && isReject && await serverHasPermission(req.user, "REJECT_PURCHASE_ORDER")) allowed = true;
         }
         if (resourceName === "material-requirements") {
