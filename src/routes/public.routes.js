@@ -19,6 +19,7 @@ import {
 import { getNextSequence } from "../utils/sequence.js";
 import { broadcast } from "../utils/broadcaster.js";
 import { getRolesWithPermission, createNotification } from "../utils/notification.js";
+import { triggerN8nWebhook } from "../utils/webhook.js";
 const router = Router();
 const INWARD_TYPES = [
   "Inward",
@@ -316,6 +317,7 @@ router.post("/inward", async (req, res) => {
       path: "inward",
       targetRoles: storeRoles
     });
+    triggerN8nWebhook("INWARD", { transactionId: data.id, ...data }).catch(err => logger.error("n8n Inward error:", err));
     res.json({ success: true, data: inward });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -348,6 +350,7 @@ router.post("/outward", async (req, res) => {
       path: "outward",
       targetRoles: storeRoles
     });
+    triggerN8nWebhook("OUTWARD", { transactionId: data.id, ...data }).catch(err => logger.error("n8n Outward error:", err));
     res.json({ success: true, data: outward });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -488,6 +491,7 @@ router.post("/material-requirement", async (req, res) => {
       path: "material-requirements",
       targetRoles: storeRoles
     });
+    triggerN8nWebhook("MATERIAL_REQ", requirement.toObject ? requirement.toObject() : requirement).catch(err => logger.error("n8n MR error:", err));
     res.json({ success: true, data: requirement });
   } catch (error) {
     logger.error("Error creating public material requirement:", error);

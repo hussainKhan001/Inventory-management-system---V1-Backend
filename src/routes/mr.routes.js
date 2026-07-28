@@ -282,12 +282,26 @@ router.post("/", authenticate, async (req, res) => {
       targetRoles: storeRoles
     });
     await triggerN8nWebhook("MATERIAL_REQ", {
-      requirementId: requirement.id,
-      requesterName: requirement.requesterName || req.user.name,
+      mrId: requirement.id,
+      mrNumber: requirement.mrNumber || requirement.id,
+      status: requirement.status,
+      date: requirement.date,
       project: requirement.project,
-      items: requirement.items,
       location: requirement.location,
-      createdBy: req.user.name
+      purpose: requirement.purpose,
+      requesterName: requirement.requesterName || req.user.name,
+      requesterEmail: requirement.requesterEmail || req.user.email,
+      engineerId: requirement.engineerId,
+      items: (requirement.items || []).map(i => ({
+        itemName: i.itemName,
+        sku: i.sku,
+        qty: i.qty,
+        unit: i.unit,
+        remarks: i.remarks,
+      })),
+      totalItems: (requirement.items || []).length,
+      createdBy: req.user.name,
+      createdByEmail: req.user.email,
     });
     res.json({ success: true, data: requirement });
   } catch (error) {

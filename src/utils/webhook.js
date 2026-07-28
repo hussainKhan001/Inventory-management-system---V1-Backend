@@ -52,86 +52,42 @@ async function sendSlackFile(buffer, fileName, message) {
 __name(sendSlackFile, "sendSlackFile");
 
 async function triggerN8nWebhook(event, payload) {
-  const eventEnvMap = {
-    NEW_PO: process.env.N8N_WEBHOOK_NEW_PO,
-    NEW_PO_PDF: process.env.N8N_WEBHOOK_NEW_PO_PDF,
-    GRN: process.env.N8N_WEBHOOK_GRN,
-    LOW_STOCK: process.env.N8N_WEBHOOK_LOW_STOCK,
-    SUPPLIER: process.env.N8N_WEBHOOK_SUPPLIER,
-    MATERIAL_REQ: process.env.N8N_WEBHOOK_MATERIAL_REQ,
-    INWARD: process.env.N8N_WEBHOOK_INWARD,
-    OUTWARD: process.env.N8N_WEBHOOK_OUTWARD,
-    STOCK_CHECK: process.env.N8N_WEBHOOK_STOCK_CHECK,
-    PO_APPROVAL: process.env.N8N_WEBHOOK_PO_APPROVAL,
-    LOGIN: process.env.N8N_WEBHOOK_LOGIN,
-    INVENTORY_CREATE: process.env.N8N_WEBHOOK_INVENTORY_CREATE,
-    INVENTORY_UPDATE: process.env.N8N_WEBHOOK_INVENTORY_UPDATE,
-    INVENTORY_DELETE: process.env.N8N_WEBHOOK_INVENTORY_DELETE,
-    CATALOGUE_CREATE: process.env.N8N_WEBHOOK_CATALOGUE_CREATE,
-    CATALOGUE_UPDATE: process.env.N8N_WEBHOOK_CATALOGUE_UPDATE,
-    CATALOGUE_DELETE: process.env.N8N_WEBHOOK_CATALOGUE_DELETE,
-    SUPPLIER_UPDATE: process.env.N8N_WEBHOOK_SUPPLIER_UPDATE,
-    SUPPLIER_DELETE: process.env.N8N_WEBHOOK_SUPPLIER_DELETE,
-    PO_UPDATE: process.env.N8N_WEBHOOK_PO_UPDATE,
-    PO_DELETE: process.env.N8N_WEBHOOK_PO_DELETE,
-    PLANNING_CREATE: process.env.N8N_WEBHOOK_PLANNING_CREATE,
-    PLANNING_UPDATE: process.env.N8N_WEBHOOK_PLANNING_UPDATE,
-    PLANNING_DELETE: process.env.N8N_WEBHOOK_PLANNING_DELETE,
-    MR_UPDATE: process.env.N8N_WEBHOOK_MR_UPDATE,
-    MR_DELETE: process.env.N8N_WEBHOOK_MR_DELETE,
-    QUOTATION_CREATE: process.env.N8N_WEBHOOK_QUOTATION_CREATE,
-    QUOTATION_UPDATE: process.env.N8N_WEBHOOK_QUOTATION_UPDATE,
-    QUOTATION_DELETE: process.env.N8N_WEBHOOK_QUOTATION_DELETE,
-    WRITEOFF_CREATE: process.env.N8N_WEBHOOK_WRITEOFF_CREATE,
-    WRITEOFF_UPDATE: process.env.N8N_WEBHOOK_WRITEOFF_UPDATE,
-    WRITEOFF_DELETE: process.env.N8N_WEBHOOK_WRITEOFF_DELETE,
-    INWARD_UPDATE: process.env.N8N_WEBHOOK_INWARD_UPDATE,
-    INWARD_DELETE: process.env.N8N_WEBHOOK_INWARD_DELETE,
-    OUTWARD_UPDATE: process.env.N8N_WEBHOOK_OUTWARD_UPDATE,
-    OUTWARD_DELETE: process.env.N8N_WEBHOOK_OUTWARD_DELETE,
-    INWARD_RETURN: process.env.N8N_WEBHOOK_INWARD_RETURN,
-    INWARD_RETURN_UPDATE: process.env.N8N_WEBHOOK_INWARD_RETURN_UPDATE,
-    INWARD_RETURN_DELETE: process.env.N8N_WEBHOOK_INWARD_RETURN_DELETE,
-    OUTWARD_RETURN: process.env.N8N_WEBHOOK_OUTWARD_RETURN,
-    OUTWARD_RETURN_UPDATE: process.env.N8N_WEBHOOK_OUTWARD_RETURN_UPDATE,
-    OUTWARD_RETURN_DELETE: process.env.N8N_WEBHOOK_OUTWARD_RETURN_DELETE,
-    GRN_UPDATE: process.env.N8N_WEBHOOK_GRN_UPDATE,
-    GRN_DELETE: process.env.N8N_WEBHOOK_GRN_DELETE,
-    STOCK_CHECK_APPROVE: process.env.N8N_WEBHOOK_STOCK_CHECK_APPROVE,
-    STOCK_CHECK_REJECT: process.env.N8N_WEBHOOK_STOCK_CHECK_REJECT,
-    USER_CREATE: process.env.N8N_WEBHOOK_USER_CREATE,
-    USER_UPDATE: process.env.N8N_WEBHOOK_USER_UPDATE,
-    USER_DELETE: process.env.N8N_WEBHOOK_USER_DELETE,
-    ROLE_PERMISSION: process.env.N8N_WEBHOOK_ROLE_PERMISSION,
-    SETTINGS: process.env.N8N_WEBHOOK_SETTINGS
-  };
-  const webhookUrl = eventEnvMap[event] || process.env.N8N_WEBHOOK_GENERIC;
-
-  // Fire env-var webhook if configured
-  if (webhookUrl) {
-    try {
-      const headers = { "Content-Type": "application/json" };
-      if (process.env.N8N_WEBHOOK_SECRET) {
-        headers["X-Webhook-Secret"] = process.env.N8N_WEBHOOK_SECRET;
-      }
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5e3);
-      await fetch(webhookUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ event, timestamp: (/* @__PURE__ */ new Date()).toISOString(), ...payload }),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-    } catch (err) {
-      if (err.name === "AbortError") {
-        console.error(`[n8n] Webhook for event "${event}" timed out after 5s`);
-      } else {
-        console.error(`[n8n] Failed to fire webhook for event "${event}":`, err);
-      }
-    }
+  const webhookUrl = process.env.N8N_WEBHOOK_GENERIC;
+  if (!webhookUrl) {
+    console.warn(`[n8n] N8N_WEBHOOK_GENERIC is not set in process.env! Skipping webhook for event "${event}".`);
+    return;
   }
 
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (process.env.N8N_WEBHOOK_SECRET) {
+      headers["X-Webhook-Secret"] = process.env.N8N_WEBHOOK_SECRET;
+    }
+    console.log(`[n8n] Triggering webhook for event "${event}" -> ${webhookUrl}`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10e3);
+    const reqId = payload?.id || payload?.mrNumber || payload?.requestId;
+    const bodyObj = {
+      event,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      ...(reqId ? { requestId: reqId } : {}),
+      ...payload
+    };
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(bodyObj),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    console.log(`[n8n] Webhook response status for "${event}": ${res.status} ${res.statusText}`);
+  } catch (err) {
+    if (err.name === "AbortError") {
+      console.error(`[n8n] Webhook for event "${event}" timed out after 10s`);
+    } else {
+      console.error(`[n8n] Failed to fire webhook for event "${event}":`, err?.message || err);
+    }
+  }
 }
 __name(triggerN8nWebhook, "triggerN8nWebhook");
 async function checkAndFireLowStockWebhook(skus) {
