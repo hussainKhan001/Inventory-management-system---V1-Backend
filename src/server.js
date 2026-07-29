@@ -42,6 +42,7 @@ import auditRoutes from "./routes/audit.routes.js";
 import gstRateRoutes from "./routes/gstRate.routes.js";
 import formConfigRoutes, { seedFormConfigs } from "./routes/form-config.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
+import ledgerRoutes from "./routes/ledger.routes.js";
 import { encryptionMiddleware } from "./middleware/encrypt.middleware.js";
 const IS_PROD = process.env.NODE_ENV === "production";
 if (IS_PROD) {
@@ -135,6 +136,7 @@ app.use("/api/audit-logs", auditRoutes);
 app.use("/api", gstRateRoutes);
 app.use("/api/form-configs", formConfigRoutes);
 app.use("/api/accounts", accountsRoutes);
+app.use("/api/ledger", ledgerRoutes);
 app.post("/api/webhook/n8n", async (req, res) => {
   try {
     const signature = req.headers["x-webhook-secret"];

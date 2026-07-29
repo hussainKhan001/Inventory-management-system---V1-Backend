@@ -106,5 +106,6 @@ AccountSchema.index({ accountStatus: 1 });
 AccountSchema.index({ project: 1 });
 AccountSchema.index({ supplier: 1 });
 AccountSchema.index({ createdAt: -1 });
+AccountSchema.index({ grnIds: 1 });
 
 export const AccountEntry = mongoose.model("AccountEntry", AccountSchema, "accounts");

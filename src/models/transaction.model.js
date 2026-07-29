@@ -110,6 +110,7 @@ OutwardSchema.index({ gatePassNo: 1 });
 OutwardSchema.index({ type: 1, gatePassNo: 1 });
 OutwardSchema.index({ supplier: 1 });
 OutwardSchema.index({ mrId: 1 });
+OutwardSchema.index({ poId: 1 });
 OutwardSchema.index({ createdAt: -1 });
 OutwardSchema.index({ updatedAt: -1 });
 
