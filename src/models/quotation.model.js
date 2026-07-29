@@ -10,6 +10,7 @@ const QuotationItemSchema = new Schema({
   rate:         { type: Number, required: true },
   gstPct:       Number,
   gstType:      { type: String, enum: ["Inclusive","Exclusive"] },
+  brand:        String,
   approved:     { type: Boolean, default: false },
 });
 

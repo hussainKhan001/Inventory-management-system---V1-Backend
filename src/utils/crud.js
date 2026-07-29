@@ -21,7 +21,7 @@ import { triggerN8nWebhook } from "./webhook.js";
 import { broadcast } from "./broadcaster.js";
 import { PurchaseOrder, MaterialRequirement, Quotation, MRAllocation, Transaction, Settings } from "../models/index.js";
 import { POService } from "../services/po.service.js";
-import { logAudit } from "./audit.js";
+import { logAudit, buildDiff } from "./audit.js";
 const cascadeDeleteMR = /* @__PURE__ */ __name(async (mrId) => {
   await Quotation.deleteMany({ mrId });
   await MRAllocation.deleteMany({ mrId });
@@ -355,16 +355,33 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
       if (data.condition && typeof data.condition === "string") {
         data.condition = data.condition.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
       }
+      // Capture old values BEFORE mutation so we can diff what actually changed
+      const preSnapshot = oldItem.toObject ? oldItem.toObject() : { ...oldItem };
+      const oldStatus = oldItem.status;
       Object.assign(oldItem, data);
       // Mark all updated fields as modified — required for Schema.Types.Mixed fields
       // (arrays/objects) that Mongoose won't track automatically
       Object.keys(data).forEach(key => oldItem.markModified(key));
       const item = await oldItem.save();
       broadcast({ type: "DATA_UPDATED", path: resourceName });
-      const auditAction = item?.status !== oldItem?.status ? item.status?.includes("Approved") ? "APPROVE" : item.status?.includes("Reject") ? "REJECT" : "UPDATE" : "UPDATE";
-      const changedFields = Object.keys(req.body);
-      const auditDetails = item?.status !== oldItem?.status ? { from: oldItem?.status, to: item?.status, changedFields } : { changedFields };
-      logAudit(req.user, auditAction, resourceName, item[idField] || item.id, auditDetails);
+      // Only log fields whose value actually changed (skip internal/noise keys)
+      const SKIP_AUDIT_KEYS = new Set(["_id", "__v", "updatedAt", "createdAt", "auditTrail", "id"]);
+      const changedFields = Object.keys(data).filter((k) => {
+        if (SKIP_AUDIT_KEYS.has(k)) return false;
+        try { return JSON.stringify(preSnapshot[k]) !== JSON.stringify(data[k]); } catch { return true; }
+      });
+      // Build old→new diff for scalar/simple fields; skip arrays/large objects to keep it readable
+      const SKIP_DIFF_KEYS = new Set([...SKIP_AUDIT_KEYS, "items", "auditTrail", "paymentTimelines",
+        "priceComparison", "paymentApprovals", "paymentHistory", "closedItems", "approverSnapshot"]);
+      const scalarChanged = changedFields.filter((k) => !SKIP_DIFF_KEYS.has(k));
+      const changes = buildDiff(preSnapshot, data, scalarChanged);
+      const auditAction = item.status !== oldStatus
+        ? item.status?.includes("Approved") ? "APPROVE" : item.status?.includes("Reject") ? "REJECT" : "UPDATE"
+        : "UPDATE";
+      const auditDetails = item.status !== oldStatus
+        ? { from: oldStatus, to: item.status, changedFields }
+        : { changedFields };
+      logAudit(req.user, auditAction, resourceName, item[idField] || item.id, auditDetails, { changes });
       if (oldItem && item && oldItem.status !== item.status) {
         await createNotification({
           message: `${resourceName.toUpperCase()} ${item[idField] || item.id} status changed to ${item.status} by ${req.user.name}`,

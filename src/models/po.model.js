@@ -15,6 +15,7 @@ const POLineItemSchema = new Schema({
   requirementQty: Number,
   uqc:            String,
   condition:      String,
+  brand:          String,
 });
 
 const PaymentTimelineSchema = new Schema({

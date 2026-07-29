@@ -45,20 +45,24 @@ router.get("/", authenticate, async (req, res) => {
     const rolePerm = await RolePermission.findOne({ role: userRole });
     const perms = rolePerm?.permissions || [];
     const isTracking = req.query.isTracking === "true";
+    let roleFilterOr = null;
     if (!isTracking && userRole !== "Super Admin" && userRole !== "admin" && userRole !== "Director") {
       const allowedStatuses = /* @__PURE__ */ new Set();
-      const canApproveStore = perms.includes("APPROVE_MR_STORE") || userRole === "Store Incharge" || userRole === "Inventory Manager" || userRole === "Store Assistant";
+      const roleNorm = (userRole || "").toLowerCase().trim();
+      const canApproveStore = perms.includes("APPROVE_MR_STORE") || roleNorm === "store incharge" || roleNorm === "inventory manager" || roleNorm === "store assistant";
       if (canApproveStore) {
         allowedStatuses.add("Store Pending");
+        allowedStatuses.add("Approved by Store");
       }
       if (perms.includes("VIEW_MATERIAL_REQUIREMENT") || perms.includes("CREATE_MATERIAL_REQUIREMENT") || perms.includes("CREATE_PURCHASE_ORDER") || perms.includes("VIEW_PURCHASE_ORDERS") || perms.includes("EDIT_PURCHASE_ORDER")) {
         ["Quotation Phase", "Approved by AGM", "Approved by Director", "Allocated", "Partially Allocated", "Partially Issued", "Closed", "Fulfilled", "PO Created"].forEach((s) => allowedStatuses.add(s));
       }
-      query.$or = [
+      roleFilterOr = [
         { status: { $in: Array.from(allowedStatuses) } },
         { engineerId: req.user._id.toString() },
         { requesterName: req.user.name }
       ];
+      query.$or = roleFilterOr;
     }
     if (unused) {
       const linkedMrIds = await mongoose.model("PurchaseOrder").find({ mrId: { $nin: [null, ""] } }).distinct("mrId");
@@ -67,7 +71,7 @@ router.get("/", authenticate, async (req, res) => {
     if (search) {
       const escapedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const searchRegex = new RegExp(escapedSearch, "i");
-      query.$or = [
+      const searchOr = [
         { id: searchRegex },
         { mrNumber: searchRegex },
         { project: searchRegex },
@@ -75,6 +79,13 @@ router.get("/", authenticate, async (req, res) => {
         { location: searchRegex },
         { purpose: searchRegex },
       ];
+      if (roleFilterOr) {
+        // Combine role access filter + search via $and so neither overwrites the other
+        query.$and = [{ $or: roleFilterOr }, { $or: searchOr }];
+        delete query.$or;
+      } else {
+        query.$or = searchOr;
+      }
     }
     if (filterStr) {
       const { startDate: _, endDate: __, ...restFilter } = parsedFilter;
