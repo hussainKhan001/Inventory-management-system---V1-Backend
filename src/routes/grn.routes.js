@@ -70,9 +70,18 @@ router.get("/", authenticate, async (req, res) => {
       const { startDate: _, endDate: __, ...restFilter } = parsedFilter;
       query = { ...query, ...sanitizeFilter(restFilter) };
     }
+    // slim=1 excludes photo arrays — reduces payload ~70% for list/tracker views
+    const slimProjection = req.query.slim === "1" ? {
+      challanPhotos: 0,
+      personPhotos: 0,
+      "items.images": 0,
+      "receipts.challanPhotos": 0,
+      "receipts.personPhotos": 0,
+      "receipts.items.images": 0,
+    } : {};
     const [items, total] = await Promise.all([
-      GRN.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      GRN.countDocuments(query).lean()
+      GRN.find(query, slimProjection).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      GRN.countDocuments(query)
     ]);
     res.json({
       success: true,

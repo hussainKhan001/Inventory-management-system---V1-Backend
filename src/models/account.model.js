@@ -60,6 +60,14 @@ const AccountSchema = new Schema({
   billRejectedAt:   String,
   rejectionReason:  String,
 
+  // Payment approval & physical check
+  paymentApprovals:   { type: [Schema.Types.Mixed], default: [] },
+  paymentInitiatedBy: String,
+  paymentInitiatedAt: String,
+  physicalCheckData:  Schema.Types.Mixed,
+  physicalCheckBy:    String,
+  physicalCheckAt:    String,
+
   // GRN tracking
   grnIds:           { type: [String], default: [] },
   grnReceivedValue: { type: Number, default: 0 },  // sum of received qty × PO rate across all GRNs

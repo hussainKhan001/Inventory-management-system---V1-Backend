@@ -24,6 +24,7 @@ const MaterialRequirementSchema = new Schema({
   projectName:   String,
   location:      String,
   workType:      String,
+  purpose:       String,
   requirementDate: String,
   date:          { type: String, required: true },
   items:         { type: [MaterialRequirementItemSchema], required: true },

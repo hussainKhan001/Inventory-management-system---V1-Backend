@@ -9,10 +9,10 @@
   "scripts": {
     "build": "npm prune --omit=dev",
     "start": "NODE_ENV=production node src/server.js",
-    "dev": "nodemon --watch src --ext js,json --exec node src/server.js",
-    "dev:dev": "nodemon --watch src --ext js,json --exec \"node src/server.js --env=development\"",
-    "dev:prod": "nodemon --watch src --ext js,json --exec \"node src/server.js --env=production\"",
-    "dev:uat": "nodemon --watch src --ext js,json --exec \"node src/server.js --env=uat\""
+    "dev": "nodemon --watch src --watch .env --ext js,json --exec node src/server.js",
+    "dev:dev": "nodemon --watch src --watch .env --ext js,json --exec \"node src/server.js --env=development\"",
+    "dev:prod": "nodemon --watch src --watch .env --ext js,json --exec \"node src/server.js --env=production\"",
+    "dev:uat": "nodemon --watch src --watch .env --ext js,json --exec \"node src/server.js --env=uat\""
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

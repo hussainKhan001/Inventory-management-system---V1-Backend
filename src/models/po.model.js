@@ -48,6 +48,8 @@ const POSchema = new Schema({
   approvalL1At: String,
   approvalL2At: String,
   approvalL3At: String,
+  rejectedByName: String,
+  rejectedAt: String,
   justification: String,
   createdBy:    String,
   date:         String,

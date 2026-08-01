@@ -129,6 +129,35 @@ router.post("/", authenticate, async (req, res) => {
   }
 });
 
+// ── PATCH /api/accounts/by-po/:poId — patch by PO ID ────────────────────────
+router.patch("/by-po/:poId", authenticate, async (req, res) => {
+  try {
+    const doc = await AccountEntry.findOne({ poId: req.params.poId });
+    if (!doc) return res.status(404).json({ success: false, message: "Account not found for this PO" });
+
+    const { auditTrail: newAudit, paymentHistory: newHistory, ...fields } = req.body;
+
+    if (Array.isArray(newHistory) && newHistory.length > 0) {
+      const existingNos = new Set((doc.paymentHistory || []).map(p => p.installmentNo));
+      for (const entry of newHistory) {
+        if (!existingNos.has(entry.installmentNo)) {
+          doc.paymentHistory.push(entry);
+          existingNos.add(entry.installmentNo);
+        }
+      }
+    }
+    if (Array.isArray(newAudit) && newAudit.length > 0) {
+      doc.auditTrail.push(...newAudit);
+    }
+    Object.assign(doc, fields);
+    await doc.save();
+
+    res.json({ success: true, data: doc.toObject() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ── PATCH /api/accounts/:id — partial update (payment, status change, reject) ─
 router.patch("/:id", authenticate, async (req, res) => {
   try {

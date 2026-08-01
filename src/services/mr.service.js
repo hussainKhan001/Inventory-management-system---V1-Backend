@@ -85,7 +85,12 @@ class MRService {
       requirementId: mr.id,
       requesterName: mr.requesterName,
       project: mr.project,
-      items: mr.items,
+      items: (mr.items || []).map(item => ({
+        name: item.materialName || item.itemName || item.name || "",
+        sku: item.sku || "",
+        qty: item.qty,
+        unit: item.unit || "",
+      })),
       location: mr.location,
       createdBy
     }).catch((err) => logger.error("[MRService] MR create webhook failed:", err));
