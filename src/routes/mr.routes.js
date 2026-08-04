@@ -166,6 +166,9 @@ router.put("/:mrId/items/:sku/allocation", authenticate, async (req, res) => {
     if (newQty < issuedQty) {
       return res.status(400).json({ success: false, message: `Cannot reduce below issued qty (${issuedQty})` });
     }
+    if (newQty > mrItem.qty) {
+      return res.status(400).json({ success: false, message: `Cannot allocate more than required qty (${mrItem.qty})` });
+    }
     const oldQty = mrItem.allocatedQty || 0;
     const delta = newQty - oldQty;
     const inv = await Inventory.findOne({ sku: req.params.sku });
@@ -191,6 +194,14 @@ router.put("/:mrId/items/:sku/allocation", authenticate, async (req, res) => {
     else if (allAllocated) mr.status = "Allocated";
     else if (someAllocated) mr.status = "Partially Allocated";
     await mr.save({});
+    // Also update the MRAllocation document so Allocated Stock Registry reflects the change
+    const alloc = await MRAllocation.findOne({ mrId: mr.id, sku: req.params.sku });
+    if (alloc) {
+      alloc.allocatedQty = newQty;
+      alloc.remainingQty = Math.max(0, newQty - issuedQty);
+      alloc.status = alloc.remainingQty === 0 ? "Closed" : issuedQty > 0 ? "Partially Issued" : "Allocated";
+      await alloc.save({});
+    }
     broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
     broadcast({ type: "DATA_UPDATED", path: "inventory" });
     broadcast({ type: "DATA_UPDATED", path: "mr-allocations" });

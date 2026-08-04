@@ -127,6 +127,9 @@ const POSchema = new Schema({
   paymentRejectionReason: String,
   auditTrail: [Schema.Types.Mixed],
   // Cancellation
+  isLocked:    { type: Boolean, default: false },
+  lockedAt:    String,
+  lockedReason:String,
   cancelNote:  String,
   cancelledBy: String,
   cancelledAt: String,

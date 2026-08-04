@@ -2,7 +2,7 @@ var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 import { Router } from "express";
 import mongoose from "mongoose";
-import { Inward, Outward, InwardReturn, OutwardReturn, Transaction, Inventory, MRAllocation, MaterialRequirement } from "../models/index.js";
+import { Inward, Outward, InwardReturn, OutwardReturn, Transaction, Inventory, MRAllocation, MaterialRequirement, PurchaseOrder, GRN } from "../models/index.js";
 import { authenticate, serverHasPermission } from "../middleware/auth.middleware.js";
 
 function sanitizeFilter(raw) {
@@ -343,14 +343,35 @@ router.post("/outward", authenticate, async (req, res) => {
         await inv.save({});
       }
       // After ALL items updated in memory, do ONE final status check and save
-      const allFulfilled = mr.items.length > 0 && mr.items.every((i) => (i.issuedQty || 0) >= i.qty);
+      // Use MRAllocation remaining qty: MR closes when nothing is left to issue
+      // (avoids blocking on MR items that were never formally allocated/issued)
+      const remainingAllocs = await MRAllocation.countDocuments({ mrId: mr.id, remainingQty: { $gt: 0 } });
       const someIssued = mr.items.some((i) => (i.issuedQty || 0) > 0);
+      const allFulfilled = remainingAllocs === 0 && someIssued;
       if (allFulfilled) {
-        mr.status = "Fulfilled";
+        mr.status = "Closed";
       } else if (someIssued) {
         mr.status = "Partially Issued";
       }
       await mr.save({});
+      // When MR is fully closed, lock all linked POs and their GRNs
+      if (allFulfilled) {
+        const now = new Date().toISOString();
+        const linkedPOs = await PurchaseOrder.find({ mrId: mr.id }).select("id").lean();
+        const poIds = linkedPOs.map(p => p.id);
+        await PurchaseOrder.updateMany(
+          { mrId: mr.id, isLocked: { $ne: true } },
+          { isLocked: true, lockedAt: now, lockedReason: `MR ${mr.id} closed — all materials issued` }
+        );
+        if (poIds.length > 0) {
+          await GRN.updateMany(
+            { poId: { $in: poIds }, isLocked: { $ne: true } },
+            { isLocked: true, lockedAt: now }
+          );
+        }
+        broadcast({ type: "DATA_UPDATED", path: "pos" });
+        broadcast({ type: "DATA_UPDATED", path: "grn" });
+      }
     } else {
       for (const item of body.items) {
         await updateStock(
@@ -432,7 +453,7 @@ router.put("/outward/:id", authenticate, async (req, res) => {
             const someIssued = mr.items.some((mi) => (mi.issuedQty || 0) > 0);
             const allAllocated = mr.items.every((mi) => (mi.issuedQty || 0) + (mi.allocatedQty || 0) >= mi.qty);
             const someAllocated = mr.items.some((mi) => (mi.issuedQty || 0) + (mi.allocatedQty || 0) > 0);
-            if (allIssued) mr.status = "Fulfilled";
+            if (allIssued) mr.status = "Closed";
             else if (someIssued) mr.status = "Partially Issued";
             else if (allAllocated) mr.status = "Allocated";
             else if (someAllocated) mr.status = "Partially Allocated";
@@ -486,8 +507,10 @@ router.put("/outward/:id", authenticate, async (req, res) => {
         }
         mrItem.issuedQty = (mrItem.issuedQty || 0) + it.qty;
         mrItem.status = mrItem.issuedQty >= mrItem.qty ? "Issued" : "Partial";
-        const allFulfilled = mr.items.every((i) => (i.issuedQty || 0) >= i.qty);
-        mr.status = allFulfilled ? "Fulfilled" : "Partially Issued";
+        const remainingAllocsNow = await MRAllocation.countDocuments({ mrId: newMrId, remainingQty: { $gt: 0 } });
+        const someIssuedNow = mr.items.some((i) => (i.issuedQty || 0) > 0);
+        const allFulfilledNow = remainingAllocsNow === 0 && someIssuedNow;
+        mr.status = allFulfilledNow ? "Closed" : "Partially Issued";
         await mr.save({});
         inv.liveStock = Math.max(0, (inv.liveStock || 0) - it.qty);
         inv.allocatedQty = Math.max(0, (inv.allocatedQty || 0) - fromAllocation);
@@ -497,6 +520,25 @@ router.put("/outward/:id", authenticate, async (req, res) => {
           applyStoreDelta(inv, data.store, Math.max(0, getSiteStock(inv, data.store) - it.qty));
         }
         await inv.save({});
+      }
+      // After all items re-applied, lock POs/GRNs if MR is now Closed
+      const finalMr = await MaterialRequirement.findOne({ id: newMrId }).lean();
+      if (finalMr && finalMr.status === "Closed") {
+        const now = new Date().toISOString();
+        const linkedPOs = await PurchaseOrder.find({ mrId: finalMr.id }).select("id").lean();
+        const poIds = linkedPOs.map(p => p.id);
+        await PurchaseOrder.updateMany(
+          { mrId: finalMr.id, isLocked: { $ne: true } },
+          { isLocked: true, lockedAt: now, lockedReason: `MR ${finalMr.id} closed — all materials issued` }
+        );
+        if (poIds.length > 0) {
+          await GRN.updateMany(
+            { poId: { $in: poIds }, isLocked: { $ne: true } },
+            { isLocked: true, lockedAt: now }
+          );
+        }
+        broadcast({ type: "DATA_UPDATED", path: "pos" });
+        broadcast({ type: "DATA_UPDATED", path: "grn" });
       }
     } else {
       // Non-MR-linked: reverse old, check stock, apply new
@@ -585,7 +627,7 @@ router.delete("/outward/:id", authenticate, async (req, res) => {
               const someIssued = mr.items.some((mi) => (mi.issuedQty || 0) > 0);
               const allAllocated = mr.items.every((mi) => (mi.issuedQty || 0) + (mi.allocatedQty || 0) >= mi.qty);
               const someAllocated = mr.items.some((mi) => (mi.issuedQty || 0) + (mi.allocatedQty || 0) > 0);
-              if (allIssued) mr.status = "Fulfilled";
+              if (allIssued) mr.status = "Closed";
               else if (someIssued) mr.status = "Partially Issued";
               else if (allAllocated) mr.status = "Allocated";
               else if (someAllocated) mr.status = "Partially Allocated";
@@ -917,6 +959,14 @@ router.put("/mr-allocations/:id", authenticate, async (req, res) => {
     if (newQty < issuedQty) {
       return res.status(400).json({ success: false, message: `Cannot reduce below already issued qty (${issuedQty})` });
     }
+    // Cap at MR item's required qty
+    const mrForCheck = await MaterialRequirement.findOne({ id: alc.mrId });
+    if (mrForCheck) {
+      const mrItemForCheck = mrForCheck.items.find(i => i.sku === alc.sku);
+      if (mrItemForCheck && newQty > mrItemForCheck.qty) {
+        return res.status(400).json({ success: false, message: `Cannot allocate more than required qty (${mrItemForCheck.qty})` });
+      }
+    }
     const oldRemaining = alc.remainingQty || 0;
     const newRemaining = newQty - issuedQty;
     const delta = newRemaining - oldRemaining; // positive = need more from inventory, negative = return to inventory
@@ -1132,7 +1182,7 @@ router.delete("/transactions/:id", authenticate, async (req, res) => {
             const someIssued = mr.items.some((mi) => (mi.issuedQty || 0) > 0);
             const allAllocated = mr.items.every((mi) => (mi.issuedQty || 0) + (mi.allocatedQty || 0) >= mi.qty);
             const someAllocated = mr.items.some((mi) => (mi.issuedQty || 0) + (mi.allocatedQty || 0) > 0);
-            if (allIssued) mr.status = "Fulfilled";
+            if (allIssued) mr.status = "Closed";
             else if (someIssued) mr.status = "Partially Issued";
             else if (allAllocated) mr.status = "Allocated";
             else if (someAllocated) mr.status = "Store Pending";

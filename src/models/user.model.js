@@ -12,7 +12,8 @@ const UserSchema = new Schema({
   phone:         { type: String, default: "" },
   designation:   { type: String, default: "" },
   department:    { type: String, default: "" },
-  employeeId:    { type: String, default: "" },
+  employeeId:        { type: String, default: "" },
+  assignedProjects:  { type: [String], default: [] },
   // OTP / Two-factor login
   otpHash:     { type: String, select: false },
   otpExpiry:   { type: Date,   select: false },

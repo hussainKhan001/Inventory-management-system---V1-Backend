@@ -54,10 +54,12 @@ router.get("/", authenticate, async (req, res) => {
       }
     }
     if (search) {
-      const searchRegex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const searchRegex = new RegExp(escaped, "i");
+      const poExactRegex = new RegExp("^" + escaped + "$", "i");
       query.$or = [
         { id: searchRegex },
-        { poId: searchRegex },
+        { poId: poExactRegex },
         { mrNo: searchRegex },
         { supplier: searchRegex },
         { vendor: searchRegex },

@@ -82,6 +82,8 @@ const GRNSchema = new Schema({
   personPhotoUrl:     String,
   personPhotos:       [String],
   // Payment tracking (Accounts)
+  isLocked:           { type: Boolean, default: false },
+  lockedAt:           String,
   paymentStatus:      { type: String, enum: ["unpaid", "bill_verified", "payment_pending", "paid"], default: "unpaid" },
   invoiceNo:          String,
   invoiceAmount:      Number,
