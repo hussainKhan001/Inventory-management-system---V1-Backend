@@ -230,7 +230,19 @@ router.post("/allocate", authenticate, async (req, res) => {
       if (finalAllocQty <= 0) continue;
       const inv = await Inventory.findOne({ sku: allocReq.sku });
       if (!inv) throw new Error(`Item ${allocReq.sku} not found in inventory`);
-      const actualAvailable = Math.max(0, (inv.liveStock || 0) - (inv.allocatedQty || 0));
+      // Sync liveStock from locationStock map in case pre-save hook hasn't run
+      if (inv.locationStock && inv.locationStock.size > 0) {
+        const siteTotal = [...inv.locationStock.values()].reduce((s, v) => s + Math.max(0, Number(v) || 0), 0);
+        if (siteTotal > (inv.liveStock || 0)) inv.liveStock = siteTotal;
+      }
+      // Use per-store stock when a godown is specified; otherwise use global available
+      let actualAvailable;
+      if (allocReq.store && inv.locationStock) {
+        const storeQty = Number(inv.locationStock.get(allocReq.store) ?? 0);
+        actualAvailable = Math.max(0, storeQty);
+      } else {
+        actualAvailable = Math.max(0, (inv.liveStock || 0) - (inv.allocatedQty || 0));
+      }
       if (actualAvailable < finalAllocQty) {
         throw new Error(`Insufficient available stock for ${inv.itemName} (${allocReq.sku}). Available: ${actualAvailable}, Requested: ${finalAllocQty}`);
       }
