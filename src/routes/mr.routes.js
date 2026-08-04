@@ -304,7 +304,7 @@ router.post("/", authenticate, async (req, res) => {
       requesterEmail: requirement.requesterEmail || req.user.email,
       engineerId: requirement.engineerId,
       items: (requirement.items || []).map(i => ({
-        itemName: i.itemName,
+        itemName: i.materialName,
         sku: i.sku,
         qty: i.qty,
         unit: i.unit,

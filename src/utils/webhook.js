@@ -51,10 +51,24 @@ async function sendSlackFile(buffer, fileName, message) {
 }
 __name(sendSlackFile, "sendSlackFile");
 
+const EVENT_URL_MAP = {
+  INWARD:                 "N8N_WEBHOOK_INWARD",
+  INWARD_UPDATE:          "N8N_WEBHOOK_INWARD_UPDATE",
+  INWARD_DELETE:          "N8N_WEBHOOK_INWARD_DELETE",
+  OUTWARD:                "N8N_WEBHOOK_OUTWARD",
+  OUTWARD_UPDATE:         "N8N_WEBHOOK_OUTWARD_UPDATE",
+  OUTWARD_DELETE:         "N8N_WEBHOOK_OUTWARD_DELETE",
+  MATERIAL_REQ:           "N8N_WEBHOOK_MATERIAL_REQ",
+  NEW_PO:                 "N8N_WEBHOOK_NEW_PO",
+  GRN:                    "N8N_WEBHOOK_GRN",
+  LOW_STOCK:              "N8N_WEBHOOK_LOW_STOCK",
+};
+
 async function triggerN8nWebhook(event, payload) {
-  const webhookUrl = process.env.N8N_WEBHOOK_GENERIC;
+  const envKey = EVENT_URL_MAP[event];
+  const webhookUrl = (envKey && process.env[envKey]) || process.env.N8N_WEBHOOK_GENERIC;
   if (!webhookUrl) {
-    console.warn(`[n8n] N8N_WEBHOOK_GENERIC is not set in process.env! Skipping webhook for event "${event}".`);
+    console.warn(`[n8n] No webhook URL set for event "${event}" (checked ${envKey || "—"} and N8N_WEBHOOK_GENERIC). Skipping.`);
     return;
   }
 
