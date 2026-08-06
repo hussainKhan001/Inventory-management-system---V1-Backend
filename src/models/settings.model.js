@@ -70,6 +70,14 @@ const SettingsSchema = new Schema({
     warnBeforeHours:  { type: Number, default: 6 },
     escalateToRole:   { type: String, default: "Super Admin" },
   },
+  mrReportConfig: {
+    enabled:         { type: Boolean, default: false },
+    slackWebhookUrl: { type: String,  default: "" },
+    scheduleTime:    { type: String,  default: "20:00" },
+    dataRange:       { type: String,  default: "today" },
+    recipientUserIds:{ type: [String], default: [] },
+  },
+  reportAutomations: { type: Array, default: [] },
 }, { timestamps: true });
 
 export const Settings = mongoose.model("Settings", SettingsSchema);

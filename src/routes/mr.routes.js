@@ -2,8 +2,10 @@ var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 import { logger } from "../utils/logger.js";
 import { Router } from "express";
+import { generateMRReportPDF } from "../utils/mrPdfGenerator.js";
 import mongoose from "mongoose";
-import { MaterialRequirement, Inventory, MRAllocation, RolePermission } from "../models/index.js";
+import { MaterialRequirement, Inventory, MRAllocation, RolePermission, Settings } from "../models/index.js";
+import { uploadPDFToSlack } from "../scheduler.js";
 import { authenticate, serverHasPermission } from "../middleware/auth.middleware.js";
 import { getRolesWithPermission, createNotification } from "../utils/notification.js";
 import { triggerN8nWebhook } from "../utils/webhook.js";
@@ -343,6 +345,71 @@ router.post("/", authenticate, async (req, res) => {
     res.status(400).json({ success: false, message: error.message });
   }
 });
+router.get("/export", authenticate, async (req, res) => {
+  try {
+    const { startDate, endDate, project, requesterName, status, search } = req.query;
+
+    const day = startDate ? new Date(startDate) : new Date();
+    const start = new Date(day); start.setHours(0, 0, 0, 0);
+    const endDay = endDate ? new Date(endDate) : new Date(day);
+    const end = new Date(endDay); end.setHours(23, 59, 59, 999);
+
+    const query = { createdAt: { $gte: start, $lte: end } };
+    if (project) query.project = project;
+    if (requesterName) query.requesterName = requesterName;
+    if (status) query.status = status;
+    if (search) {
+      const re = new RegExp(search, "i");
+      query.$or = [{ mrNumber: re }, { requesterName: re }, { project: re }, { "items.materialName": re }];
+    }
+
+    const mrs = await MaterialRequirement.find(query).sort({ createdAt: 1 }).lean();
+
+    const dateStr = start.toISOString().slice(0, 10);
+    const isSameDay = start.toDateString() === end.toDateString();
+    const dateLabel = isSameDay
+      ? start.toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })
+      : `${start.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })} – ${end.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}`;
+
+    const pdfBuffer = await generateMRReportPDF(mrs, dateLabel);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="MR-Report-${dateStr}.pdf"`);
+    res.send(pdfBuffer);
+
+    // After download, silently push to Slack channels from active MR automations
+    setImmediate(async () => {
+      try {
+        const botToken = process.env.SLACK_BOT_TOKEN;
+        if (!botToken) return;
+        const settings = await Settings.findOne().lean();
+        const automations = settings?.reportAutomations || [];
+        const slackIds = [...new Set(
+          automations
+            .filter(a => a.enabled && (!a.module || a.module === "MR") && a.slackIds?.length)
+            .flatMap(a => a.slackIds)
+        )];
+        if (!slackIds.length) return;
+        const pdfFilename = `MR-Report-${dateStr}.pdf`;
+        const exportedBy = req.user?.name || "User";
+        const message = `📋 *MR Report — ${dateLabel}*\nManually exported by *${exportedBy}*\n*Total MRs:* ${mrs.length}`;
+        for (const channelId of slackIds) {
+          try {
+            await uploadPDFToSlack(botToken, channelId, pdfBuffer, pdfFilename, message);
+            logger.info(`[MR Export] PDF sent to Slack channel ${channelId}`);
+          } catch (err) {
+            logger.error(`[MR Export] Slack upload to ${channelId} failed: ${err.message}`);
+          }
+        }
+      } catch (err) {
+        logger.error("[MR Export] Slack auto-send error:", err.message);
+      }
+    });
+  } catch (err) {
+    logger.error("Error exporting MR report:", err);
+    if (!res.headersSent) res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 createCrudRoutes(router, MaterialRequirement, "material-requirements", "id", "MATERIAL_REQUIREMENT", "MR");
 var stdin_default = router;
 export {

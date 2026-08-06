@@ -43,6 +43,7 @@ import gstRateRoutes from "./routes/gstRate.routes.js";
 import formConfigRoutes, { seedFormConfigs } from "./routes/form-config.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import ledgerRoutes from "./routes/ledger.routes.js";
+import { initScheduler, sendDailyMRReport } from "./scheduler.js";
 import { encryptionMiddleware } from "./middleware/encrypt.middleware.js";
 const IS_PROD = process.env.NODE_ENV === "production";
 if (IS_PROD) {
@@ -108,9 +109,19 @@ app.use(encryptionMiddleware);
 const uploadDir = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 app.use("/uploads", express.static(uploadDir));
-connectDB().then(() => seedFormConfigs());
+connectDB().then(() => { seedFormConfigs(); initScheduler(); });
 initBroadcaster(server);
 app.get("/api/health", (_req, res) => res.json({ status: "ok", ts: Date.now() }));
+
+// Public route to serve generated report PDFs via /api path (works behind any reverse proxy)
+app.get("/api/reports/:filename", (req, res) => {
+  const filename = path.basename(req.params.filename); // strip any path traversal
+  const filepath = path.join(process.cwd(), "uploads", "reports", filename);
+  if (!fs.existsSync(filepath)) return res.status(404).json({ success: false, message: "Report not found" });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+  res.sendFile(filepath);
+});
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/role-permissions", rolePermissionRoutes);
@@ -137,6 +148,20 @@ app.use("/api", gstRateRoutes);
 app.use("/api/form-configs", formConfigRoutes);
 app.use("/api/accounts", accountsRoutes);
 app.use("/api/ledger", ledgerRoutes);
+app.post("/api/webhook/trigger-mr-report", async (req, res) => {
+  try {
+    const secret = req.headers["x-webhook-secret"];
+    if (process.env.SLACK_REPORT_SECRET && secret !== process.env.SLACK_REPORT_SECRET) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+    const dataRange = req.query.dataRange || req.body?.dataRange || "today";
+    const slackIds = req.body?.slackIds || [];
+    await sendDailyMRReport(undefined, dataRange, slackIds);
+    res.json({ success: true, message: "MR report sent to n8n" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 app.post("/api/webhook/n8n", async (req, res) => {
   try {
     const signature = req.headers["x-webhook-secret"];
