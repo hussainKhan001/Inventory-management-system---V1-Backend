@@ -4,7 +4,7 @@ import { logger } from "../utils/logger.js";
 import { Router } from "express";
 import { generateMRReportPDF } from "../utils/mrPdfGenerator.js";
 import mongoose from "mongoose";
-import { MaterialRequirement, Inventory, MRAllocation, RolePermission, Settings } from "../models/index.js";
+import { MaterialRequirement, Inventory, MRAllocation, RolePermission, Settings, Quotation } from "../models/index.js";
 import { uploadPDFToSlack } from "../scheduler.js";
 import { authenticate, serverHasPermission } from "../middleware/auth.middleware.js";
 import { getRolesWithPermission, createNotification } from "../utils/notification.js";
@@ -64,6 +64,12 @@ router.get("/", authenticate, async (req, res) => {
         { engineerId: req.user._id.toString() },
         { requesterName: req.user.name }
       ];
+      // PO creators must also see MRs whose quotation is already Approved,
+      // regardless of what status the MR itself is in
+      if (perms.includes("CREATE_PURCHASE_ORDER") || perms.includes("VIEW_PURCHASE_ORDERS") || perms.includes("EDIT_PURCHASE_ORDER")) {
+        const approvedMrIds = await Quotation.distinct("mrId", { status: "Approved" });
+        if (approvedMrIds.length) roleFilterOr.push({ id: { $in: approvedMrIds } });
+      }
       query.$or = roleFilterOr;
     }
     if (unused) {
