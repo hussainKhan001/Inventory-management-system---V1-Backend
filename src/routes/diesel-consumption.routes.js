@@ -60,6 +60,26 @@ router.post("/", authenticate, async (req, res) => {
   }
 });
 
+router.put("/:id", authenticate, async (req, res) => {
+  try {
+    const { date, driverName, equipment, site, qtyUsed, meterReading, remarks } = req.body;
+    if (!date || !driverName || !equipment || !site || !qtyUsed) {
+      return res.status(400).json({ success: false, message: "Date, driver name, equipment, site and quantity are required" });
+    }
+    const entry = await DieselConsumption.findOneAndUpdate(
+      { id: req.params.id },
+      { $set: { date, driverName: String(driverName).trim(), equipment: String(equipment).trim(), site: String(site).trim(), qtyUsed: Number(qtyUsed), meterReading: meterReading ? String(meterReading).trim() : "", remarks: remarks ? String(remarks).trim() : "" } },
+      { new: true }
+    );
+    if (!entry) return res.status(404).json({ success: false, message: "Entry not found" });
+    broadcast({ type: "DATA_UPDATED", path: "diesel-consumption" });
+    logAudit(req.user, "UPDATE", "DieselConsumption", req.params.id, { site, qtyUsed });
+    res.json({ success: true, data: entry });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 router.delete("/:id", authenticate, async (req, res) => {
   try {
     const roleLower = (req.user.role || "").toLowerCase().trim();
