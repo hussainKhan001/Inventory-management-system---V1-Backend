@@ -57,8 +57,11 @@ router.get("/", authenticate, async (req, res) => {
       const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const searchRegex = new RegExp(escaped, "i");
       const poExactRegex = new RegExp("^" + escaped + "$", "i");
+      // Use anchored exact match when input is a full GRN ID (GRN-YYYY-NNN)
+      const isFullGrnId = /^GRN-\d{4}-\d+$/i.test(search);
+      const idMatcher = isFullGrnId ? poExactRegex : searchRegex;
       query.$or = [
-        { id: searchRegex },
+        { id: idMatcher },
         { poId: poExactRegex },
         { mrNo: searchRegex },
         { supplier: searchRegex },
@@ -71,6 +74,10 @@ router.get("/", authenticate, async (req, res) => {
     if (filterStr) {
       const { startDate: _, endDate: __, ...restFilter } = parsedFilter;
       query = { ...query, ...sanitizeFilter(restFilter) };
+    }
+    // Always exclude merged/inactive GRNs unless admin explicitly requests them
+    if (req.query.showMerged !== "1") {
+      query.isActive = { $ne: false };
     }
     // slim=1 excludes photo arrays — reduces payload ~70% for list/tracker views
     const slimProjection = req.query.slim === "1" ? {
@@ -102,6 +109,23 @@ router.post("/", authenticate, async (req, res) => {
       return res.status(403).json({ success: false, message: "Forbidden" });
     }
     const rawGrnData = req.body;
+    // H11: Server-side enforcement — one active GRN per PO prevents duplicates
+    // regardless of which client or concurrent request triggers the create.
+    if (rawGrnData.poId) {
+      const existingActiveGRN = await GRN.findOne({
+        poId: rawGrnData.poId,
+        isActive: { $ne: false },
+        status: { $ne: "Merged" }
+      }, { id: 1, status: 1 }).lean();
+      if (existingActiveGRN) {
+        return res.status(409).json({
+          success: false,
+          message: `An active GRN (${existingActiveGRN.id}) already exists for this PO. Add a new shipment to the existing GRN instead.`,
+          existingGrnId: existingActiveGRN.id,
+          action: "add_receipt"
+        });
+      }
+    }
     const grnData = {
       ...rawGrnData,
       items: (rawGrnData.items || []).map((item) => ({
@@ -243,7 +267,7 @@ router.post("/", authenticate, async (req, res) => {
     if (grnData.poId) {
       const po = await PurchaseOrder.findOne({ id: grnData.poId });
       if (po) {
-        const allGrns = await GRN.find({ poId: grnData.poId });
+        const allGrns = await GRN.find({ poId: grnData.poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
         let allFulfilled = true;
         let anyVariance = false;
         for (const poItem of po.items) {
@@ -419,7 +443,7 @@ router.put("/:id", authenticate, async (req, res) => {
     if (poId) {
       const po = await PurchaseOrder.findOne({ id: poId });
       if (po) {
-        const allGrns = await GRN.find({ poId });
+        const allGrns = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
         const updatedGrnsList = allGrns.map((g) => g.id === req.params.id ? grn : g);
         let allFulfilled = true;
         let anyVariance = false;
@@ -520,11 +544,11 @@ router.post("/:id/receipt", authenticate, async (req, res) => {
       }
     }
     await grn.save();
-    // H6: Update PO status by aggregating ALL GRNs for this PO (not just current GRN status)
+    // H6: Update PO status by aggregating ALL active GRNs for this PO (not just current GRN status)
     if (grn.poId) {
       const po = await PurchaseOrder.findOne({ id: grn.poId });
       if (po) {
-        const allGrns = await GRN.find({ poId: grn.poId });
+        const allGrns = await GRN.find({ poId: grn.poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
         let allFulfilled = true;
         let anyVariance = false;
         for (const poItem of po.items) {
@@ -626,11 +650,11 @@ router.put("/:id/receipt/:idx", authenticate, async (req, res) => {
         }
       }
 
-      // Update PO status by aggregating ALL GRNs for this PO (H8 fix)
+      // Update PO status by aggregating ALL active GRNs for this PO (H8 fix)
       if (grn.poId) {
         const po = await PurchaseOrder.findOne({ id: grn.poId });
         if (po) {
-          const allGrns = await GRN.find({ poId: grn.poId });
+          const allGrns = await GRN.find({ poId: grn.poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
           let allFulfilled = true;
           let anyVariance = false;
           for (const poItem of po.items) {
@@ -701,7 +725,7 @@ router.delete("/:id", authenticate, async (req, res) => {
     if (poId) {
       const po = await PurchaseOrder.findOne({ id: poId });
       if (po) {
-        const remainingGrns = await GRN.find({ poId });
+        const remainingGrns = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
         let allFulfilled = true;
         let anyVariance = false;
         let hasAnyReceipt = remainingGrns.length > 0;
@@ -740,6 +764,143 @@ router.delete("/:id", authenticate, async (req, res) => {
     res.status(400).json({ success: false, message: error.message });
   }
 });
+// POST /grn/:id/merge — fold one or more source GRNs into a target GRN
+// Inventory quantities are NOT changed (stock already moved when original GRNs were created).
+// Source GRNs are marked { status: "Merged", isActive: false, mergedInto: targetId }.
+router.post("/:id/merge", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "EDIT_GRN")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    const targetId = req.params.id;
+    const sourceIds = req.body.grnIds;
+    if (!Array.isArray(sourceIds) || sourceIds.length === 0) {
+      return res.status(400).json({ success: false, message: "grnIds must be a non-empty array of source GRN IDs to merge" });
+    }
+    if (sourceIds.includes(targetId)) {
+      return res.status(400).json({ success: false, message: "Target GRN cannot appear in the source list" });
+    }
+
+    const target = await GRN.findOne({ id: targetId });
+    if (!target) return res.status(404).json({ success: false, message: `Target GRN ${targetId} not found` });
+    if (!target.isActive || target.status === "Merged") {
+      return res.status(400).json({ success: false, message: `Target GRN ${targetId} is already merged — cannot use it as a merge target` });
+    }
+
+    const sources = await GRN.find({ id: { $in: sourceIds } });
+    if (sources.length !== sourceIds.length) {
+      const found = new Set(sources.map(s => s.id));
+      const missing = sourceIds.filter(id => !found.has(id));
+      return res.status(404).json({ success: false, message: `Source GRNs not found: ${missing.join(", ")}` });
+    }
+    for (const src of sources) {
+      if (!src.isActive || src.status === "Merged") {
+        return res.status(400).json({ success: false, message: `GRN ${src.id} is already merged — cannot merge it again` });
+      }
+      if (target.poId && src.poId !== target.poId) {
+        return res.status(400).json({ success: false, message: `GRN ${src.id} belongs to PO ${src.poId}, but target belongs to PO ${target.poId}. Cannot merge across POs.` });
+      }
+    }
+
+    const mergedIds = [];
+    const shipmentsAdded = [];
+    target.receipts = target.receipts || [];
+
+    for (const src of sources) {
+      const srcObj = src.toObject();
+
+      // Convert source's initial delivery (root fields) into a receipt batch on the target
+      const rootItems = (srcObj.items || []).filter(i => (i.received || 0) > 0);
+      if (rootItems.length > 0) {
+        target.receipts.push({
+          date:          srcObj.date,
+          challan:       srcObj.challan,
+          mrNo:          srcObj.mrNo,
+          docType:       srcObj.docType,
+          personName:    srcObj.personName,
+          challanPhotos: srcObj.challanPhotos || [],
+          personPhotos:  srcObj.personPhotos  || [],
+          items: rootItems.map(i => ({ sku: i.sku, itemName: i.itemName, received: i.received || 0, images: i.images || [] })),
+          paymentStatus: srcObj.paymentStatus || "unpaid",
+          invoiceNo:     srcObj.invoiceNo,
+          invoiceAmount: srcObj.invoiceAmount,
+          verifiedBy:    srcObj.verifiedBy,
+          verifiedAt:    srcObj.verifiedAt,
+          verifyRemark:  srcObj.verifyRemark,
+          approvedBy:    srcObj.approvedBy,
+          approvedAt:    srcObj.approvedAt,
+          rejectedBy:    srcObj.rejectedBy,
+          rejectedAt:    srcObj.rejectedAt,
+          rejectReason:  srcObj.rejectReason,
+          payment:       srcObj.payment
+        });
+        shipmentsAdded.push({ fromGrn: src.id, type: "initial", challan: srcObj.challan });
+      }
+
+      // Bring over each of source's subsequent receipt batches as-is
+      for (const r of (srcObj.receipts || [])) {
+        target.receipts.push(r);
+        shipmentsAdded.push({ fromGrn: src.id, type: "receipt", challan: r.challan });
+      }
+
+      // Accumulate source received qtys onto target items[] so GRN totals stay correct
+      const qtyBySKU = {};
+      (srcObj.items || []).forEach(i => { qtyBySKU[i.sku] = (qtyBySKU[i.sku] || 0) + (i.received || 0); });
+
+      target.items = target.items.map(item => {
+        const obj = item.toObject ? item.toObject() : { ...item };
+        const added = qtyBySKU[obj.sku] || 0;
+        const totalReceived = (obj.received || 0) + added;
+        return { ...obj, received: totalReceived, variance: totalReceived - (obj.ordered || 0) };
+      });
+
+      // Append any SKUs from source that do not exist in target at all
+      for (const [sku, qty] of Object.entries(qtyBySKU)) {
+        const exists = target.items.some(i => (i.toObject ? i.toObject() : i).sku === sku);
+        if (!exists) {
+          const si = srcObj.items.find(i => i.sku === sku) || {};
+          target.items.push({ sku, itemName: si.itemName || sku, ordered: 0, received: qty, variance: qty, unit: si.unit || "NOS", images: si.images || [] });
+        }
+      }
+
+      // Mark source as merged — soft-delete preserves history
+      await GRN.findOneAndUpdate({ id: src.id }, { status: "Merged", isActive: false, mergedInto: targetId });
+
+      // Re-point Inward + Transaction records so history still links to the surviving GRN
+      await Inward.updateMany({ grnRef: src.id }, { grnRef: targetId });
+      await Transaction.updateMany({ linkId: src.id }, { linkId: targetId });
+
+      mergedIds.push(src.id);
+    }
+
+    // Recalculate consolidated GRN status
+    const hasShortage = target.items.some(i => { const o = i.toObject ? i.toObject() : i; return (o.received || 0) < (o.ordered || 0); });
+    const hasExcess   = target.items.some(i => { const o = i.toObject ? i.toObject() : i; return (o.received || 0) > (o.ordered || 0); });
+    target.status = hasShortage ? "Partial" : hasExcess ? "Over-Received" : "Confirmed";
+    target.markModified("items");
+    target.markModified("receipts");
+    await target.save();
+
+    logAudit(req.user, "GRN_MERGED", "GRN", targetId, {
+      mergedFrom: mergedIds, poId: target.poId,
+      shipmentsAdded: shipmentsAdded.length, mergedBy: req.user.name
+    });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    broadcast({ type: "DATA_UPDATED", path: "inward" });
+    broadcast({ type: "DATA_UPDATED", path: "transactions" });
+    broadcast({ type: "DATA_UPDATED", path: "pos" });
+
+    res.json({
+      success: true,
+      message: `Merged ${mergedIds.length} GRN(s) into ${targetId}`,
+      data: { targetGrnId: targetId, mergedGrnIds: mergedIds, shipmentsAdded: shipmentsAdded.length, newStatus: target.status }
+    });
+  } catch (error) {
+    logger.error("Error merging GRNs:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // One-time migration: recompute status for all existing GRNs
 router.post("/migrate-status", authenticate, async (req, res) => {
   try {
@@ -747,7 +908,7 @@ router.post("/migrate-status", authenticate, async (req, res) => {
     if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
       return res.status(403).json({ success: false, message: "Super Admin only" });
     }
-    const grns = await GRN.find({}, { id: 1, items: 1, status: 1 }).lean();
+    const grns = await GRN.find({ status: { $ne: "Merged" }, isActive: { $ne: false } }, { id: 1, items: 1, status: 1 }).lean();
     let updated = 0;
     for (const grn of grns) {
       const hasShortage = (grn.items || []).some((it) => (it.received || 0) < (it.ordered || 0));
@@ -807,7 +968,7 @@ router.post("/renumber", authenticate, async (req, res) => {
 // ─── Helper: compute PO payment status from ALL GRNs + ALL receipt batches ───
 async function updatePOPaymentStatus(poId) {
   if (!poId) return;
-  const allPOGRNs = await GRN.find({ poId });
+  const allPOGRNs = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
   let allPaid = allPOGRNs.length > 0;
   let somePaid = false;
   let totalPaid = 0;
@@ -979,6 +1140,58 @@ router.delete("/:id/payment", authenticate, async (req, res) => {
     broadcast({ type: "DATA_UPDATED", path: "grn" });
     res.json({ success: true });
   } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/bill-reject — Reject root shipment bill at verify stage
+router.put("/:id/bill-reject", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus === "paid") return res.status(400).json({ success: false, message: "Cannot reject a paid shipment — it is locked" });
+    const { reason } = req.body;
+    grn.paymentStatus = "bill_rejected";
+    grn.rejectedBy = req.user.name;
+    grn.rejectedAt = new Date().toISOString();
+    if (reason) grn.rejectReason = reason;
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { paymentStatus: "bill_rejected", reason });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN bill-reject error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/receipt/:idx/bill-reject — Reject receipt-level shipment bill
+router.put("/:id/receipt/:idx/bill-reject", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx, 10);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt batch not found" });
+    if (receipt.paymentStatus === "paid") return res.status(400).json({ success: false, message: "Cannot reject a paid shipment — it is locked" });
+    const { reason } = req.body;
+    grn.receipts[idx].paymentStatus = "bill_rejected";
+    grn.receipts[idx].rejectedBy = req.user.name;
+    grn.receipts[idx].rejectedAt = new Date().toISOString();
+    if (reason) grn.receipts[idx].rejectReason = reason;
+    grn.markModified("receipts");
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_bill_rejected", receiptIdx: idx, reason });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN receipt bill-reject error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 });

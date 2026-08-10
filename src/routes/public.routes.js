@@ -563,6 +563,37 @@ router.post("/supplier-registration", async (req, res) => {
     res.status(400).json({ success: false, message: error.message });
   }
 });
+// Public diesel consumption submission (no auth required)
+router.post("/diesel-consumption", async (req, res) => {
+  try {
+    const { DieselConsumption } = await import("../models/index.js");
+    const { date, driverName, equipment, site, qtyUsed, meterReading, remarks } = req.body;
+    if (!date || !driverName || !equipment || !site || !qtyUsed) {
+      return res.status(400).json({ success: false, message: "Date, driver name, equipment, site and quantity are required" });
+    }
+    const year = new Date().getFullYear();
+    const seq = await getNextSequence(`diesel-consumption-${year}`);
+    const id = `DC-${year}-${String(seq).padStart(4, "0")}`;
+    const entry = new DieselConsumption({
+      id,
+      date,
+      driverName: String(driverName).trim(),
+      equipment: String(equipment).trim(),
+      site: String(site).trim(),
+      qtyUsed: Number(qtyUsed),
+      meterReading: meterReading ? String(meterReading).trim() : "",
+      remarks: remarks ? String(remarks).trim() : "",
+      submittedBy: "Public Form",
+      submittedAt: new Date().toISOString(),
+    });
+    await entry.save();
+    broadcast({ type: "DATA_UPDATED", path: "diesel-consumption" });
+    res.json({ success: true, data: { id } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 var stdin_default = router;
 export {
   stdin_default as default

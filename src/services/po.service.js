@@ -15,25 +15,21 @@ class POService {
     await Transaction.deleteMany({ poId }).session(session || null);
     await Outward.deleteMany({ poId }).session(session || null);
     const po = await PurchaseOrder.findOne({ id: poId }).session(session || null);
-    // Clear linkedPoId from the source quotation when PO is deleted
+    // Unlock the source quotation when PO is deleted
     if (po && po.quotationId) {
       await Quotation.findOneAndUpdate(
         { id: po.quotationId },
         { $unset: { linkedPoId: "" } }
       ).session(session || null);
+      broadcast({ type: "DATA_UPDATED", path: "quotations" });
     }
+    // Unlock the MR — reset to Quotation Phase so it can be re-used
     if (po && po.mrId) {
       const otherPOs = await PurchaseOrder.find({ mrId: po.mrId, id: { $ne: poId } }).session(session || null);
       if (otherPOs.length === 0) {
         await MaterialRequirement.updateOne(
           { id: po.mrId },
-          {
-            $set: {
-              status: "Approved by AGM",
-              approvedQuotationId: "",
-              approvedSupplier: ""
-            }
-          }
+          { $set: { status: "Quotation Phase" } }
         ).session(session || null);
         broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
       }

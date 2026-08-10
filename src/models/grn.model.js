@@ -49,7 +49,7 @@ const GRNReceiptSchema = new Schema({
   personPhotos:  [String],
   items:         [GRNReceiptItemSchema],
   // Per-receipt payment tracking
-  paymentStatus: { type: String, enum: ["unpaid", "bill_verified", "payment_pending", "paid"], default: "unpaid" },
+  paymentStatus: { type: String, enum: ["unpaid", "bill_verified", "bill_approved", "bill_rejected", "payment_pending", "paid"], default: "unpaid" },
   invoiceNo:     String,
   invoiceAmount: Number,
   verifiedBy:    String,
@@ -57,6 +57,9 @@ const GRNReceiptSchema = new Schema({
   verifyRemark:  String,
   approvedBy:    String,
   approvedAt:    String,
+  rejectedBy:    String,
+  rejectedAt:    String,
+  rejectReason:  String,
   payment:       GRNPaymentSchema,
 }, { _id: false });
 
@@ -73,7 +76,7 @@ const GRNSchema = new Schema({
   gatePassNo:         String,
   docType:            { type: String, enum: ["Challan","Invoice","Bilty","Gate Pass","Without Challan","Without Gate Pass"] },
   items:              [GRNItemSchema],
-  status:             { type: String, enum: ["Draft","Confirmed","Partial","Over-Received"], default: "Draft" },
+  status:             { type: String, enum: ["Draft","Confirmed","Partial","Over-Received","Merged"], default: "Draft" },
   receipts:           { type: [GRNReceiptSchema], default: [] },
   materialImageUrl:   String,
   challanImageUrl:    String,
@@ -84,7 +87,7 @@ const GRNSchema = new Schema({
   // Payment tracking (Accounts)
   isLocked:           { type: Boolean, default: false },
   lockedAt:           String,
-  paymentStatus:      { type: String, enum: ["unpaid", "bill_verified", "payment_pending", "paid"], default: "unpaid" },
+  paymentStatus:      { type: String, enum: ["unpaid", "bill_verified", "bill_approved", "bill_rejected", "payment_pending", "paid"], default: "unpaid" },
   invoiceNo:          String,
   invoiceAmount:      Number,
   verifiedBy:         String,
@@ -92,7 +95,13 @@ const GRNSchema = new Schema({
   verifyRemark:       String,
   approvedBy:         String,
   approvedAt:         String,
+  rejectedBy:         String,
+  rejectedAt:         String,
+  rejectReason:       String,
   payment:            GRNPaymentSchema,
+  // Merge tracking — set when this GRN is folded into another
+  mergedInto:         { type: String, default: null },
+  isActive:           { type: Boolean, default: true },
 }, { timestamps: true });
 
 GRNSchema.index({ poId: 1 });

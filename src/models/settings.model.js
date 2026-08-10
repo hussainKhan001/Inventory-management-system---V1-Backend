@@ -36,6 +36,13 @@ const SettingsSchema = new Schema({
     l2: { type: Boolean, default: false },
     l3: { type: Boolean, default: false },
   },
+  // Per-company approver overrides — if a PO's companyName matches, these take precedence over global approvers
+  companyApprovers: [{
+    companyName: { type: String },
+    l1: { type: String, default: "" }, l1Id: { type: String, default: "" }, l1Title: { type: String, default: "" },
+    l2: { type: String, default: "" }, l2Id: { type: String, default: "" }, l2Title: { type: String, default: "" },
+    l3: { type: String, default: "" }, l3Id: { type: String, default: "" }, l3Title: { type: String, default: "" },
+  }],
   stores:    { type: [String], default: [] },
   sites:     [{ siteName: String, siteCode: String }],
   gstRates:  { type: [String], default: ["0%", "5%", "12%", "18%", "28%"] },

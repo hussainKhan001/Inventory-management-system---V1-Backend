@@ -43,7 +43,8 @@ import gstRateRoutes from "./routes/gstRate.routes.js";
 import formConfigRoutes, { seedFormConfigs } from "./routes/form-config.routes.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import ledgerRoutes from "./routes/ledger.routes.js";
-import { initScheduler, sendDailyMRReport } from "./scheduler.js";
+import dieselConsumptionRoutes from "./routes/diesel-consumption.routes.js";
+import { initScheduler, sendModuleReport } from "./scheduler.js";
 import { encryptionMiddleware } from "./middleware/encrypt.middleware.js";
 const IS_PROD = process.env.NODE_ENV === "production";
 if (IS_PROD) {
@@ -148,16 +149,18 @@ app.use("/api", gstRateRoutes);
 app.use("/api/form-configs", formConfigRoutes);
 app.use("/api/accounts", accountsRoutes);
 app.use("/api/ledger", ledgerRoutes);
+app.use("/api/diesel-consumption", dieselConsumptionRoutes);
 app.post("/api/webhook/trigger-mr-report", async (req, res) => {
   try {
     const secret = req.headers["x-webhook-secret"];
     if (process.env.SLACK_REPORT_SECRET && secret !== process.env.SLACK_REPORT_SECRET) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
-    const dataRange = req.query.dataRange || req.body?.dataRange || "today";
-    const slackIds = req.body?.slackIds || [];
-    await sendDailyMRReport(undefined, dataRange, slackIds);
-    res.json({ success: true, message: "MR report sent to n8n" });
+    const moduleKey = req.query.module || req.body?.module || "MR";
+    const dataRange  = req.query.dataRange || req.body?.dataRange || "today";
+    const slackIds   = req.body?.slackIds || [];
+    await sendModuleReport(moduleKey, dataRange, slackIds);
+    res.json({ success: true, message: `${moduleKey} report sent` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

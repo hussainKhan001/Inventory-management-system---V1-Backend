@@ -42,7 +42,7 @@ router.put("/:id", authenticate, async (req, res) => {
         await MaterialRequirement.findOneAndUpdate(
           { id: quote.mrId },
           {
-            status: "Store Pending",
+            status: "Quotation Phase",
             $unset: { approvedQuotationId: "", approvedSupplier: "" },
             approvals: []
           }

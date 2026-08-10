@@ -22,6 +22,7 @@ import { triggerN8nWebhook, checkAndFireLowStockWebhook } from "../utils/webhook
 import { broadcast } from "../utils/broadcaster.js";
 import { createCrudRoutes } from "../utils/crud.js";
 import { logAudit } from "../utils/audit.js";
+import { getNextSequence } from "../utils/sequence.js";
 const router = Router();
 
 // Get site-specific stock: checks locationStock Map first, then falls back to sites[].liveStock
@@ -151,7 +152,10 @@ router.post("/inward", authenticate, async (req, res) => {
     if (!body.items || !Array.isArray(body.items)) throw new Error("Items array required");
     const skus = body.items.map(i => i.sku);
     if (new Set(skus).size !== skus.length) throw new Error("Duplicate SKUs in items — combine quantities for the same item");
-    const data = { ...body, type: body.type || "Manual" };
+    const inwardType = body.type || "Manual";
+    const inPrefix = inwardType.startsWith("Transfer") ? "TRF" : "INW";
+    const inSeq = await getNextSequence(`txn-${inPrefix.toLowerCase()}`);
+    const data = { ...body, id: `${inPrefix}-${new Date().getFullYear()}-${inSeq.toString().padStart(4, "0")}`, type: inwardType };
     const inward = await Inward.create(data);
     for (const item of body.items) {
       await updateStock(
@@ -167,7 +171,7 @@ router.post("/inward", authenticate, async (req, res) => {
     }
     await Transaction.create({
       ...data,
-      type: data.type === "Transfer" ? "Transfer Inward" : data.type || "Inward"
+      type: data.type === "Transfer" ? "Transfer Inward" : (data.type === "Manual" ? "Inward" : data.type || "Inward")
     });
     // If this is a Transfer Inward, update the corresponding Transfer Outward's status
     if ((data.type || "").includes("Transfer")) {
@@ -275,10 +279,15 @@ router.post("/outward", authenticate, async (req, res) => {
     if (!body.items || !Array.isArray(body.items)) throw new Error("Items array required");
     const outSkus = body.items.map(i => i.sku);
     if (new Set(outSkus).size !== outSkus.length) throw new Error("Duplicate SKUs in items — combine quantities for the same item");
+    const txnType = body.type || (body.mrId ? "MR-Outward" : "Manual");
+    const prefix = txnType.startsWith("Transfer") ? "TRF" : txnType === "MR-Outward" ? "MRO" : "OUT";
+    const seq = await getNextSequence(`txn-${prefix.toLowerCase()}`);
+    const generatedId = `${prefix}-${new Date().getFullYear()}-${seq.toString().padStart(4, "0")}`;
     const data = {
       ...body,
+      id: generatedId,
       status: "Confirmed",
-      type: body.type || (body.mrId ? "MR-Outward" : "Manual")
+      type: txnType
     };
     // Pre-validate ALL items before creating any documents (prevents orphaned Outward on stock failure)
     for (const item of body.items) {
@@ -337,6 +346,7 @@ router.post("/outward", authenticate, async (req, res) => {
         inv.liveStock = Math.max(0, (inv.liveStock || 0) - item.qty);
         inv.allocatedQty = Math.max(0, (inv.allocatedQty || 0) - fromAllocation);
         inv.issuedQty = (inv.issuedQty || 0) + item.qty;
+        inv.availableQty = Math.max(0, (inv.liveStock || 0) - inv.allocatedQty);
         if (body.store) {
           applyStoreDelta(inv, body.store, Math.max(0, getSiteStock(inv, body.store) - item.qty));
         }
@@ -345,9 +355,9 @@ router.post("/outward", authenticate, async (req, res) => {
       // After ALL items updated in memory, do ONE final status check and save
       // Use MRAllocation remaining qty: MR closes when nothing is left to issue
       // (avoids blocking on MR items that were never formally allocated/issued)
-      const remainingAllocs = await MRAllocation.countDocuments({ mrId: mr.id, remainingQty: { $gt: 0 } });
+      const allItemsFulfilled = mr.items.every((i) => (i.issuedQty || 0) >= i.qty);
       const someIssued = mr.items.some((i) => (i.issuedQty || 0) > 0);
-      const allFulfilled = remainingAllocs === 0 && someIssued;
+      const allFulfilled = allItemsFulfilled && someIssued;
       if (allFulfilled) {
         mr.status = "Closed";
       } else if (someIssued) {
@@ -457,7 +467,7 @@ router.put("/outward/:id", authenticate, async (req, res) => {
             else if (someIssued) mr.status = "Partially Issued";
             else if (allAllocated) mr.status = "Allocated";
             else if (someAllocated) mr.status = "Partially Allocated";
-            else mr.status = "Approved";
+            else mr.status = "Store Pending";
             await mr.save({});
           }
           inv.liveStock = (inv.liveStock || 0) + it.qty;
@@ -507,9 +517,9 @@ router.put("/outward/:id", authenticate, async (req, res) => {
         }
         mrItem.issuedQty = (mrItem.issuedQty || 0) + it.qty;
         mrItem.status = mrItem.issuedQty >= mrItem.qty ? "Issued" : "Partial";
-        const remainingAllocsNow = await MRAllocation.countDocuments({ mrId: newMrId, remainingQty: { $gt: 0 } });
+        const allItemsFulfilledNow = mr.items.every((i) => (i.issuedQty || 0) >= i.qty);
         const someIssuedNow = mr.items.some((i) => (i.issuedQty || 0) > 0);
-        const allFulfilledNow = remainingAllocsNow === 0 && someIssuedNow;
+        const allFulfilledNow = allItemsFulfilledNow && someIssuedNow;
         mr.status = allFulfilledNow ? "Closed" : "Partially Issued";
         await mr.save({});
         inv.liveStock = Math.max(0, (inv.liveStock || 0) - it.qty);
@@ -577,6 +587,8 @@ router.put("/outward/:id", authenticate, async (req, res) => {
     broadcast({ type: "DATA_UPDATED", path: "outward" });
     broadcast({ type: "DATA_UPDATED", path: "inventory" });
     broadcast({ type: "DATA_UPDATED", path: "transactions" });
+    broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
+    broadcast({ type: "DATA_UPDATED", path: "mr-allocations" });
     await triggerN8nWebhook("OUTWARD_UPDATE", {
       transactionId: req.params.id,
       updatedBy: req.user.name,
@@ -631,7 +643,7 @@ router.delete("/outward/:id", authenticate, async (req, res) => {
               else if (someIssued) mr.status = "Partially Issued";
               else if (allAllocated) mr.status = "Allocated";
               else if (someAllocated) mr.status = "Partially Allocated";
-              else mr.status = "Approved";
+              else mr.status = "Store Pending";
               await mr.save({});
             }
           }
@@ -706,7 +718,8 @@ router.patch("/outward/:id/transfer-status", authenticate, async (req, res) => {
 });
 router.post("/inward-returns", authenticate, async (req, res) => {
   try {
-    const data = req.body;
+    const irSeq = await getNextSequence("txn-inr");
+    const data = { ...req.body, id: `INR-${new Date().getFullYear()}-${irSeq.toString().padStart(4, "0")}` };
     if (!data.items || !Array.isArray(data.items)) throw new Error("Items array required");
     for (const it of data.items) {
       const invCheck = await Inventory.findOne({ sku: it.sku });
@@ -804,7 +817,8 @@ router.delete("/inward-returns/:id", authenticate, async (req, res) => {
 });
 router.post("/outward-returns", authenticate, async (req, res) => {
   try {
-    const data = req.body;
+    const orSeq = await getNextSequence("txn-our");
+    const data = { ...req.body, id: `OUR-${new Date().getFullYear()}-${orSeq.toString().padStart(4, "0")}` };
     if (!data.items || !Array.isArray(data.items)) throw new Error("Items array required");
     const item = await OutwardReturn.create([data]);
     for (const it of data.items) {
@@ -1124,6 +1138,10 @@ router.post("/transactions", authenticate, async (req, res) => {
       }
       await invItem.save({});
     }
+    const txTypeRaw = transactionData.type || "Inward";
+    const txPrefix = txTypeRaw.startsWith("Transfer") ? "TRF" : txTypeRaw.toLowerCase().includes("outward") ? "OUT" : "INW";
+    const txSeq = await getNextSequence(`txn-${txPrefix.toLowerCase()}`);
+    transactionData.id = `${txPrefix}-${new Date().getFullYear()}-${txSeq.toString().padStart(4, "0")}`;
     const transaction = await Transaction.create([transactionData]);
     logAudit(req.user, "CREATE", "Transaction", transactionData.id, { type: transactionData.type, project: transactionData.project, itemCount: transactionData.items?.length });
     broadcast({ type: "DATA_UPDATED", path: "transactions" });
@@ -1147,7 +1165,7 @@ router.delete("/transactions/:id", authenticate, async (req, res) => {
   try {
     const tx = await Transaction.findOne({ id: req.params.id });
     if (!tx) throw new Error("Transaction not found");
-    const isOutward = ["Outward", "Transfer Outward", "Manual", "MR-Outward", "Public Outward", "Public Transfer Outward"].includes(tx.type) || tx.id.startsWith("OUT") || tx.type.toLowerCase().includes("outward");
+    const isOutward = ["Outward", "Transfer Outward", "MR-Outward", "Public Outward", "Public Transfer Outward"].includes(tx.type) || tx.id.startsWith("OUT") || tx.id.startsWith("MRO") || tx.type.toLowerCase().includes("outward");
     if (isOutward) {
       for (const it of tx.items || []) {
         if (!it.sku) continue;
@@ -1185,8 +1203,8 @@ router.delete("/transactions/:id", authenticate, async (req, res) => {
             if (allIssued) mr.status = "Closed";
             else if (someIssued) mr.status = "Partially Issued";
             else if (allAllocated) mr.status = "Allocated";
-            else if (someAllocated) mr.status = "Store Pending";
-            else mr.status = "Approved";
+            else if (someAllocated) mr.status = "Partially Allocated";
+            else mr.status = "Store Pending";
             await mr.save({});
           }
         }

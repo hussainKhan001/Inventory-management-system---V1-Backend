@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { Settings, Inventory, PurchaseOrder, WriteOff, Transaction, MaterialRequirement, MRAllocation, Quotation } from "../models/index.js";
+import { Settings, Inventory, PurchaseOrder, WriteOff, Transaction, MaterialRequirement, MRAllocation, Quotation, User } from "../models/index.js";
 import { authenticate } from "../middleware/auth.middleware.js";
 import { broadcast } from "../utils/broadcaster.js";
 import { triggerN8nWebhook } from "../utils/webhook.js";
@@ -191,9 +191,61 @@ router.get("/settings", authenticate, async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+// Collect all user IDs assigned to a given approver level across global + all companies
+function getApproverIds(settings, level) {
+  const ids = new Set();
+  const gId = settings?.approvers?.[`${level}Id`];
+  if (gId) ids.add(gId);
+  (settings?.companyApprovers || []).forEach(ca => {
+    const id = ca[`${level}Id`];
+    if (id) ids.add(id);
+  });
+  return ids;
+}
+
+const LEVEL_PERM = {
+  l1: "APPROVE_PURCHASE_ORDER_L1",
+  l2: "APPROVE_PURCHASE_ORDER_L2",
+  l3: "APPROVE_PURCHASE_ORDER_L3",
+};
+
+async function syncApproverPermissions(oldSettings, newBody) {
+  for (const level of ["l1", "l2", "l3"]) {
+    const oldIds = getApproverIds(oldSettings, level);
+    // Build new effective settings by merging old with incoming body
+    const newEffective = {
+      approvers: newBody.approvers ?? oldSettings?.approvers,
+      companyApprovers: newBody.companyApprovers ?? oldSettings?.companyApprovers,
+    };
+    const newIds = getApproverIds(newEffective, level);
+    const perm = LEVEL_PERM[level];
+
+    // Grant permission to newly added approvers
+    for (const id of newIds) {
+      if (!oldIds.has(id)) {
+        await User.findByIdAndUpdate(id, { $addToSet: { permissions: perm } });
+      }
+    }
+    // Revoke permission from removed approvers (only if not still assigned at this level)
+    for (const id of oldIds) {
+      if (!newIds.has(id)) {
+        await User.findByIdAndUpdate(id, { $pull: { permissions: perm } });
+      }
+    }
+  }
+}
+
 router.put("/settings", authenticate, async (req, res) => {
   try {
-    const settings = await Settings.findOneAndUpdate({}, req.body, { returnDocument: 'after', upsert: true });
+    const oldSettings = await Settings.findOne().lean();
+    const { _id, __v, createdAt, updatedAt, ...updateBody } = req.body;
+    const settings = await Settings.findOneAndUpdate({}, { $set: updateBody }, { returnDocument: 'after', upsert: true, new: true });
+    // Auto-grant/revoke APPROVE_PURCHASE_ORDER_L1/L2/L3 based on approver changes
+    if (req.body.approvers || req.body.companyApprovers) {
+      await syncApproverPermissions(oldSettings, req.body).catch(err =>
+        console.error("[Settings] syncApproverPermissions failed:", err.message)
+      );
+    }
     statsCache = null;
     broadcast({ type: "DATA_UPDATED", path: "settings" });
     await triggerN8nWebhook("SETTINGS", {

@@ -104,17 +104,18 @@ router.post("/", authenticate, async (req, res) => {
     const loadingTotal = calcCharge(data.loadingAmount || 0, data.loadingGstPct || 0, data.loadingGstType || "Exclusive");
     const unloadingTotal = calcCharge(data.unloadingAmount || 0, data.unloadingGstPct || 0, data.unloadingGstType || "Exclusive");
     const totalValue = itemsTotal + freightTotal + loadingTotal + unloadingTotal;
-    const settingsCfg = await Settings.findOne({}, { approvers: 1 }).lean();
-    const approverSnapshot = settingsCfg?.approvers ? {
-      purchaseCoord:      settingsCfg.approvers.purchaseCoord      || "",
-      purchaseCoordTitle: settingsCfg.approvers.purchaseCoordTitle || "",
-      l1:      settingsCfg.approvers.l1      || "",
-      l1Title: settingsCfg.approvers.l1Title || "",
-      l2:      settingsCfg.approvers.l2      || "",
-      l2Title: settingsCfg.approvers.l2Title || "",
-      l3:      settingsCfg.approvers.l3      || "",
-      l3Title: settingsCfg.approvers.l3Title || "",
-    } : undefined;
+    const settingsCfg = await Settings.findOne({}, { approvers: 1, companyApprovers: 1 }).lean();
+    const baseApv = settingsCfg?.approvers || {};
+    // Company-specific approvers override global approvers when companyName matches
+    const companyApvCfg = (settingsCfg?.companyApprovers || []).find(ca => ca.companyName === data.companyName);
+    const apv = companyApvCfg || baseApv;
+    const approverSnapshot = {
+      purchaseCoord:      baseApv.purchaseCoord      || "",
+      purchaseCoordTitle: baseApv.purchaseCoordTitle || "",
+      l1: apv.l1 || "", l1Id: apv.l1Id || "", l1Title: apv.l1Title || "",
+      l2: apv.l2 || "", l2Id: apv.l2Id || "", l2Title: apv.l2Title || "",
+      l3: apv.l3 || "", l3Id: apv.l3Id || "", l3Title: apv.l3Title || "",
+    };
     const item = await PurchaseOrder.create({
       ...data,
       id: customId,
@@ -213,7 +214,7 @@ router.put("/:id/cancel", authenticate, async (req, res) => {
         }
         await MaterialRequirement.findOneAndUpdate(
           { id: po.mrId },
-          { status: "Store Pending", $unset: { approvedQuotationId: "", approvedSupplier: "" } }
+          { status: "Quotation Phase", $unset: { approvedQuotationId: "", approvedSupplier: "" } }
         );
         broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
       }

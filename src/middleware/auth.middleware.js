@@ -3,6 +3,15 @@ var __name = (target, value) => __defProp(target, "name", { value, configurable:
 import jwt from "jsonwebtoken";
 import { User, RolePermission } from "../models/index.js";
 const JWT_SECRET = process.env.JWT_SECRET || (process.env.NODE_ENV !== "production" ? "dev-only-secret" : "");
+
+// Cache user lookups for 60 seconds to avoid a DB hit on every request
+const _userCache = new Map();
+const USER_CACHE_TTL = 60_000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _userCache) if (v.exp < now) _userCache.delete(k);
+}, 120_000);
+
 const authenticate = /* @__PURE__ */ __name(async (req, res, next) => {
   let token = req.headers.authorization?.split(" ")[1] || req.cookies?.token;
   if (token === "null" || token === "undefined") {
@@ -11,7 +20,13 @@ const authenticate = /* @__PURE__ */ __name(async (req, res, next) => {
   if (!token) return res.status(401).json({ success: false, message: "Unauthorized" });
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = await User.findById(decoded.id);
+    const cached = _userCache.get(token);
+    if (cached && cached.exp > Date.now()) {
+      req.user = cached.user;
+    } else {
+      req.user = await User.findById(decoded.id);
+      if (req.user) _userCache.set(token, { user: req.user, exp: Date.now() + USER_CACHE_TTL });
+    }
     if (!req.user || !req.user.isActive) return res.status(401).json({ success: false, message: "Unauthorized" });
     next();
   } catch (error) {

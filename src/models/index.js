@@ -13,6 +13,7 @@ export { AuditLog }               from "./audit-log.model.js";
 export { User }                   from "./user.model.js";
 export { RolePermission }         from "./role-permission.model.js";
 export { Notification }           from "./notification.model.js";
+export { DieselConsumption }      from "./diesel-consumption.model.js";
 export { Settings }               from "./settings.model.js";
 export { Counter }                from "./counter.model.js";
 export { MaterialRequirement, MRAllocation } from "./material-requirement.model.js";

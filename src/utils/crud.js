@@ -101,6 +101,31 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
         const { startDate: _, endDate: __, ...restFilter } = crudFilter;
         query = { ...query, ...sanitizeFilter(restFilter) };
       }
+      // Company-scoped visibility: company-specific approvers only see their assigned companies' POs
+      if (resourceName === "pos") {
+        const uid = req.user._id.toString();
+        const roleLower = (req.user.role || "").toLowerCase().trim();
+        const isSuperAdmin = roleLower === "super admin" || roleLower === "superadmin" || roleLower === "admin";
+        const canSeeAll = isSuperAdmin || await serverHasPermission(req.user, "EDIT_PURCHASE_ORDER") || await serverHasPermission(req.user, "CREATE_PURCHASE_ORDER");
+        if (!canSeeAll) {
+          const cfg = await Settings.findOne({}, { approvers: 1, companyApprovers: 1 }).lean();
+          const ga = cfg?.approvers || {};
+          const isGlobalApprover = [ga.l1Id, ga.l2Id, ga.l3Id].filter(Boolean).includes(uid);
+          if (!isGlobalApprover) {
+            const assignedCompanies = (cfg?.companyApprovers || [])
+              .filter(ca => [ca.l1Id, ca.l2Id, ca.l3Id].filter(Boolean).includes(uid))
+              .map(ca => ca.companyName);
+            if (assignedCompanies.length > 0) {
+              query.companyName = { $in: assignedCompanies };
+            } else {
+              // Not a global approver and not assigned to any company → show only own POs
+              query.createdBy = req.user.name;
+            }
+          }
+          // isGlobalApprover → sees all POs, no company filter
+        }
+      }
+
       const [items, total] = await Promise.all([
         model.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
         model.countDocuments(query).lean()
@@ -226,17 +251,28 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
           const isApprovalL2 = updateKeys.includes("approvalL2") || updateKeys.includes("approvalL2At");
           const isApprovalL3 = updateKeys.includes("approvalL3") || updateKeys.includes("approvalL3At");
           const isAccountUpdate = updateKeys.includes("accountStatus") || updateKeys.includes("payment") || updateKeys.includes("invoice");
-          if (!allowed && isApprovalL1 && await serverHasPermission(req.user, "APPROVE_PURCHASE_ORDER_L1")) allowed = true;
-          if (!allowed && isApprovalL2 && await serverHasPermission(req.user, "APPROVE_PURCHASE_ORDER_L2")) allowed = true;
-          if (!allowed && isApprovalL3 && await serverHasPermission(req.user, "APPROVE_PURCHASE_ORDER_L3")) allowed = true;
-          // Dynamic approver: user assigned in System Settings gets approval power automatically
+          // Dynamic approver: current company Settings → global Settings → snapshot (fallback for legacy POs)
           if (!allowed && (isApprovalL1 || isApprovalL2 || isApprovalL3)) {
-            const cfg = await Settings.findOne({}, { approvers: 1 }).lean();
-            if (cfg?.approvers) {
-              const uid = req.user._id.toString();
-              if (isApprovalL1 && cfg.approvers.l1Id && cfg.approvers.l1Id === uid) allowed = true;
-              if (isApprovalL2 && cfg.approvers.l2Id && cfg.approvers.l2Id === uid) allowed = true;
-              if (isApprovalL3 && cfg.approvers.l3Id && cfg.approvers.l3Id === uid) allowed = true;
+            const uid = req.user._id.toString();
+            const docSnap = await model.findOne({ [idField]: req.params.id }, { approverSnapshot: 1, companyName: 1 }).lean();
+            const cfg = await Settings.findOne({}, { approvers: 1, companyApprovers: 1 }).lean();
+            const companyCA = (cfg?.companyApprovers || []).find(ca => ca.companyName === docSnap?.companyName);
+            if (companyCA && (companyCA.l1Id || companyCA.l2Id || companyCA.l3Id)) {
+              // 1. Company-specific Settings takes full precedence when configured
+              if (isApprovalL1 && companyCA.l1Id && companyCA.l1Id === uid) allowed = true;
+              if (isApprovalL2 && companyCA.l2Id && companyCA.l2Id === uid) allowed = true;
+              if (isApprovalL3 && companyCA.l3Id && companyCA.l3Id === uid) allowed = true;
+            } else {
+              // 2. No company-specific config → check snapshot first, then global
+              const snap = docSnap?.approverSnapshot || {};
+              if (isApprovalL1 && snap.l1Id && snap.l1Id === uid) allowed = true;
+              if (isApprovalL2 && snap.l2Id && snap.l2Id === uid) allowed = true;
+              if (isApprovalL3 && snap.l3Id && snap.l3Id === uid) allowed = true;
+              if (!allowed && cfg?.approvers) {
+                if (isApprovalL1 && cfg.approvers.l1Id && cfg.approvers.l1Id === uid) allowed = true;
+                if (isApprovalL2 && cfg.approvers.l2Id && cfg.approvers.l2Id === uid) allowed = true;
+                if (isApprovalL3 && cfg.approvers.l3Id && cfg.approvers.l3Id === uid) allowed = true;
+              }
             }
           }
           if (!allowed && isAccountUpdate && (
@@ -267,7 +303,7 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
       const oldItem = await model.findOne({ [idField]: req.params.id });
       if (!oldItem) return res.status(404).json({ success: false, message: "Not found" });
       if (resourceName === "material-requirements") {
-        const poExists = await PurchaseOrder.findOne({ mrId: req.params.id });
+        const poExists = await PurchaseOrder.findOne({ mrId: req.params.id, status: { $nin: ["Cancelled", "Rejected", "Blocked"] } });
         if (poExists) {
           const identityFields = ["project", "mrNumber"];
           const tryingToChangeIdentity = Object.keys(req.body).some((key) => identityFields.includes(key));
@@ -341,16 +377,16 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
       delete data._id;
       // Freeze approver names when PO reaches final approval for the first time
       if (resourceName === "pos" && data.status === "Approved" && oldItem.status !== "Approved") {
-        const settingsCfg = await Settings.findOne({}, { approvers: 1 }).lean();
-        if (settingsCfg?.approvers) {
-          const a = settingsCfg.approvers;
-          data.approverSnapshot = {
-            purchaseCoord: a.purchaseCoord || "", purchaseCoordTitle: a.purchaseCoordTitle || "",
-            l1: a.l1 || "", l1Title: a.l1Title || "",
-            l2: a.l2 || "", l2Title: a.l2Title || "",
-            l3: a.l3 || "", l3Title: a.l3Title || "",
-          };
-        }
+        const settingsCfg = await Settings.findOne({}, { approvers: 1, companyApprovers: 1 }).lean();
+        const baseApv = settingsCfg?.approvers || {};
+        const companyApvCfg = (settingsCfg?.companyApprovers || []).find(ca => ca.companyName === oldItem.companyName);
+        const apv = companyApvCfg || baseApv;
+        data.approverSnapshot = {
+          purchaseCoord: baseApv.purchaseCoord || "", purchaseCoordTitle: baseApv.purchaseCoordTitle || "",
+          l1: apv.l1 || "", l1Id: apv.l1Id || "", l1Title: apv.l1Title || "",
+          l2: apv.l2 || "", l2Id: apv.l2Id || "", l2Title: apv.l2Title || "",
+          l3: apv.l3 || "", l3Id: apv.l3Id || "", l3Title: apv.l3Title || "",
+        };
       }
       if (data.condition && typeof data.condition === "string") {
         data.condition = data.condition.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
@@ -415,6 +451,33 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
               path: "pos",
               targetRoles: ["Super Admin", "admin", "Purchase coordinator"]
             });
+            // Reset linked MR to Quotation Phase if all its POs are now inactive
+            if (item.mrId) {
+              const activePOs = await PurchaseOrder.findOne({
+                mrId: item.mrId,
+                status: { $nin: ["Cancelled", "Rejected", "Blocked"] }
+              });
+              if (!activePOs) {
+                const mr = await MaterialRequirement.findOne({ id: item.mrId });
+                if (mr) {
+                  // Reset the linked quotation back to Pending
+                  const quotationId = item.quotationId || mr.approvedQuotationId;
+                  if (quotationId) {
+                    const newToken = `QT-TOKEN-${quotationId}-${Date.now()}`;
+                    await Quotation.findOneAndUpdate(
+                      { id: quotationId },
+                      { status: "Pending", token: newToken }
+                    );
+                    broadcast({ type: "DATA_UPDATED", path: "quotations" });
+                  }
+                  await MaterialRequirement.findOneAndUpdate(
+                    { id: item.mrId },
+                    { status: "Quotation Phase", $unset: { approvedQuotationId: "", approvedSupplier: "" } }
+                  );
+                  broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
+                }
+              }
+            }
           }
           if (nextPermission) {
             const roles = await getRolesWithPermission(nextPermission);
