@@ -1,6 +1,78 @@
 import { logger } from "./logger.js";
 import { AuditLog } from "../models/index.js";
 
+const ACTION_COLOR = {
+  CREATE:  "#2EB67D",
+  UPDATE:  "#ECB22E",
+  DELETE:  "#E01E5A",
+  APPROVE: "#2EB67D",
+  REJECT:  "#E01E5A",
+  CANCEL:  "#ECB22E",
+  LOGIN:   "#36C5F0",
+  LOGOUT:  "#808080",
+};
+
+const ACTION_EMOJI = {
+  CREATE:  "✅",
+  UPDATE:  "✏️",
+  DELETE:  "🗑️",
+  APPROVE: "✅",
+  REJECT:  "❌",
+  CANCEL:  "🚫",
+  LOGIN:   "🔐",
+  LOGOUT:  "🔓",
+};
+
+const sendSlackAudit = async (user, action, resource, resourceId, details) => {
+  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+  if (!webhookUrl || !webhookUrl.startsWith("https://")) return;
+
+  const emoji  = ACTION_EMOJI[action]  || "📋";
+  const color  = ACTION_COLOR[action]  || "#439FE0";
+  const now    = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
+  const detailText = details && Object.keys(details).length
+    ? Object.entries(details).map(([k, v]) => `• *${k}:* ${v}`).join("\n")
+    : null;
+
+  const body = {
+    attachments: [{
+      color,
+      blocks: [
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: `${emoji} *${action} — ${resource}*` },
+        },
+        {
+          type: "section",
+          fields: [
+            { type: "mrkdwn", text: `*User:*\n${user.name || "Unknown"}` },
+            { type: "mrkdwn", text: `*ID:*\n\`${resourceId}\`` },
+          ],
+        },
+        ...(detailText ? [{
+          type: "section",
+          text: { type: "mrkdwn", text: detailText },
+        }] : []),
+        {
+          type: "context",
+          elements: [{ type: "mrkdwn", text: `🕐 ${now} IST  •  ${user.email || ""}` }],
+        },
+      ],
+    }],
+  };
+
+  try {
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    logger.error("[Audit/Slack] Webhook failed:", err.message);
+  }
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 const _fmt = (v) => {
@@ -84,6 +156,8 @@ const logAudit = (user, action, resource, resourceId, details, opts = {}) => {
     changes:    changes || [],
     summary:    resolvedSummary,
   }).catch((err) => logger.error("[Audit] Failed to write log:", err));
+
+  sendSlackAudit(user, action, resource, resourceId, details);
 };
 
 export { logAudit, buildDiff, buildSummary };
