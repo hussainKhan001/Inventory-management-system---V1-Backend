@@ -106,7 +106,10 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
         const uid = req.user._id.toString();
         const roleLower = (req.user.role || "").toLowerCase().trim();
         const isSuperAdmin = roleLower === "super admin" || roleLower === "superadmin" || roleLower === "admin";
-        const canSeeAll = isSuperAdmin || await serverHasPermission(req.user, "EDIT_PURCHASE_ORDER") || await serverHasPermission(req.user, "CREATE_PURCHASE_ORDER");
+        const canSeeAll = isSuperAdmin
+          || await serverHasPermission(req.user, "EDIT_PURCHASE_ORDER")
+          || await serverHasPermission(req.user, "CREATE_PURCHASE_ORDER")
+          || await serverHasPermission(req.user, "VIEW_ACCOUNTS"); // accounts team sees all POs
         if (!canSeeAll) {
           const cfg = await Settings.findOne({}, { approvers: 1, companyApprovers: 1 }).lean();
           const ga = cfg?.approvers || {};
