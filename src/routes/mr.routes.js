@@ -422,7 +422,7 @@ router.get("/export", authenticate, async (req, res) => {
 
     const pdfBuffer = await generateMRReportPDF(mrs, dateLabel);
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="MR-Report-${dateStr}.pdf"`);
+    res.setHeader("Content-Disposition", `inline; filename="MR-Report-${dateStr}.pdf"`);
     res.send(pdfBuffer);
 
     // After download, silently push to Slack channels from active MR automations
