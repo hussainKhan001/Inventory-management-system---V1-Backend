@@ -150,6 +150,7 @@ const POSchema = new Schema({
 POSchema.index({ project: 1 });
 POSchema.index({ supplier: 1 });
 POSchema.index({ status: 1 });
+POSchema.index({ status: 1, createdAt: -1 }); // compound: accounts page filter + sort
 POSchema.index({ accountStatus: 1 });
 POSchema.index({ mrId: 1 });
 POSchema.index({ mrId: 1, status: 1 });
