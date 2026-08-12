@@ -16,13 +16,14 @@ class POService {
     await Outward.deleteMany({ poId }).session(session || null);
     const po = await PurchaseOrder.findOne({ id: poId }).session(session || null);
     // Unlock the source quotation when PO is deleted
-    if (po && po.quotationId) {
-      await Quotation.findOneAndUpdate(
-        { id: po.quotationId },
-        { $unset: { linkedPoId: "" } }
-      ).session(session || null);
-      broadcast({ type: "DATA_UPDATED", path: "quotations" });
-    }
+    const unsetQuery = po && po.quotationId
+      ? { $or: [{ linkedPoId: poId }, { id: po.quotationId }] }
+      : { linkedPoId: poId };
+    await Quotation.updateMany(
+      unsetQuery,
+      { $unset: { linkedPoId: "" } }
+    ).session(session || null);
+    broadcast({ type: "DATA_UPDATED", path: "quotations" });
     // Unlock the MR — reset to Quotation Phase so it can be re-used
     if (po && po.mrId) {
       const otherPOs = await PurchaseOrder.find({ mrId: po.mrId, id: { $ne: poId } }).session(session || null);

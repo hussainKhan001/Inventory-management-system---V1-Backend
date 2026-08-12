@@ -189,12 +189,13 @@ router.put("/:id/cancel", authenticate, async (req, res) => {
     );
     let quotationReset = false;
     // Clear linkedPoId from source quotation when PO is cancelled
-    if (po.quotationId) {
-      await Quotation.findOneAndUpdate(
-        { id: po.quotationId },
-        { $unset: { linkedPoId: "" } }
-      );
-    }
+    const cancelUnsetQuery = po.quotationId
+      ? { $or: [{ linkedPoId: req.params.id }, { id: po.quotationId }] }
+      : { linkedPoId: req.params.id };
+    await Quotation.updateMany(
+      cancelUnsetQuery,
+      { $unset: { linkedPoId: "" } }
+    );
     if (po.mrId) {
       const mr = await MaterialRequirement.findOne({ id: po.mrId });
       if (mr) {
