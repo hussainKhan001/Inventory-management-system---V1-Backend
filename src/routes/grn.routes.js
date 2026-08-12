@@ -162,6 +162,24 @@ router.post("/", authenticate, async (req, res) => {
     );
     const seq = await getNextSequence("GRN");
     grnData.id = `GRN-${year}-${seq}`;
+
+    // Compute GRN status based on received qty vs PO ordered qty
+    if (grnData.poId) {
+      const linkedPO = await PurchaseOrder.findOne({ id: grnData.poId }, { items: 1 }).lean();
+      if (linkedPO?.items?.length) {
+        const grnSkus = new Map(grnData.items.map(i => [i.sku, i.received || 0]));
+        let anyShort = false;
+        let anyOver  = false;
+        for (const poItem of linkedPO.items) {
+          const received = grnSkus.get(poItem.sku) || 0;
+          const ordered  = poItem.qty || 0;
+          if (received < ordered) anyShort = true;
+          if (received > ordered) anyOver  = true;
+        }
+        grnData.status = anyOver ? "Over-Received" : anyShort ? "Partial" : "Confirmed";
+      }
+    }
+
     const grn = await GRN.create([grnData]);
     createdGrnId = grn[0].id;
     const inwardRecord = {
