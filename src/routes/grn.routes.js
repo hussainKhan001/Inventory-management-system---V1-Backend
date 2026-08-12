@@ -111,18 +111,18 @@ router.post("/", authenticate, async (req, res) => {
       return res.status(403).json({ success: false, message: "Forbidden" });
     }
     const rawGrnData = req.body;
-    // H11: Server-side enforcement — one active GRN per PO prevents duplicates
-    // regardless of which client or concurrent request triggers the create.
+    // H11: Block duplicate GRN only when an existing one is fully Confirmed.
+    // Partial GRNs allow a follow-up GRN for the remaining items.
     if (rawGrnData.poId) {
       const existingActiveGRN = await GRN.findOne({
         poId: rawGrnData.poId,
         isActive: { $ne: false },
-        status: { $ne: "Merged" }
+        status: { $nin: ["Merged", "Partial", "Over-Received"] }
       }, { id: 1, status: 1 }).lean();
       if (existingActiveGRN) {
         return res.status(409).json({
           success: false,
-          message: `An active GRN (${existingActiveGRN.id}) already exists for this PO. Add a new shipment to the existing GRN instead.`,
+          message: `A confirmed GRN (${existingActiveGRN.id}) already exists for this PO. All items have been received.`,
           existingGrnId: existingActiveGRN.id,
           action: "add_receipt"
         });
