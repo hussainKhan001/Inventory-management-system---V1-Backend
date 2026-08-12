@@ -104,6 +104,8 @@ router.get("/", authenticate, async (req, res) => {
 });
 router.post("/", authenticate, async (req, res) => {
   let createdGrnId = null;
+  let savedItems = [];
+  let savedStore = null;
   try {
     if (!await serverHasPermission(req.user, "CREATE_GRN")) {
       return res.status(403).json({ success: false, message: "Forbidden" });
@@ -182,6 +184,8 @@ router.post("/", authenticate, async (req, res) => {
         condition: item.condition
       }))
     };
+    savedItems = grnData.items;
+    savedStore = grnData.store || null;
     for (const item of grnData.items) {
       const qty = item.received || 0;
       const invItem = await Inventory.findOne({ sku: item.sku });
@@ -338,9 +342,35 @@ router.post("/", authenticate, async (req, res) => {
   } catch (error) {
     // C1: Compensate partial writes on failure
     if (createdGrnId) {
-      await GRN.findOneAndDelete({ id: createdGrnId }).catch(() => {});
-      await Inward.deleteMany({ grnRef: createdGrnId }).catch(() => {});
-      await Transaction.deleteMany({ linkId: createdGrnId }).catch(() => {});
+      await GRN.findOneAndDelete({ id: createdGrnId }).catch((e) => logger.error("[GRN] cleanup GRN failed:", e.message));
+      // Delete by both grnRef AND id to catch orphans left by prior failed cleanups
+      await Inward.deleteMany({
+        $or: [{ grnRef: createdGrnId }, { id: `INW-${createdGrnId}` }]
+      }).catch((e) => logger.error("[GRN] cleanup Inward failed:", e.message));
+      await Transaction.deleteMany({ linkId: createdGrnId }).catch((e) => logger.error("[GRN] cleanup Transaction failed:", e.message));
+    }
+    // C2: Rollback inventory increments that were applied before the failure
+    for (const item of savedItems) {
+      const qty = item.received || 0;
+      if (qty <= 0) continue;
+      try {
+        const invItem = await Inventory.findOne({ sku: item.sku });
+        if (!invItem) continue;
+        invItem.totalQty     = Math.max(0, (invItem.totalQty     || 0) - qty);
+        invItem.availableQty = Math.max(0, (invItem.availableQty || 0) - qty);
+        invItem.liveStock    = Math.max(0, (invItem.liveStock    || 0) - qty);
+        if (savedStore && invItem.locationStock) {
+          const curr = Number(invItem.locationStock.get(savedStore) || 0);
+          invItem.locationStock.set(savedStore, Math.max(0, curr - qty));
+          invItem.markModified("locationStock");
+          const siteEntry = invItem.sites?.find(s => s.siteName === savedStore);
+          if (siteEntry) siteEntry.liveStock = Math.max(0, (siteEntry.liveStock || 0) - qty);
+          invItem.markModified("sites");
+        }
+        await invItem.save({});
+      } catch (rollbackErr) {
+        logger.error(`[GRN] inventory rollback failed for sku ${item.sku}:`, rollbackErr.message);
+      }
     }
     res.status(400).json({ success: false, message: error.message });
   }
