@@ -49,10 +49,11 @@ const GRNReceiptSchema = new Schema({
   personPhotos:  [String],
   items:         [GRNReceiptItemSchema],
   // Per-receipt payment tracking
-  paymentStatus: { type: String, enum: ["unpaid", "bill_verified", "bill_approved", "bill_rejected", "payment_pending", "paid"], default: "unpaid" },
+  paymentStatus: { type: String, enum: ["unpaid", "bill_verified", "bill_approved", "bill_rejected", "mismatch_pending", "payment_pending", "paid"], default: "unpaid" },
   invoiceNo:     String,
   invoiceAmount: Number,
   verifiedBy:    String,
+  verifiedById:  String,
   verifiedAt:    String,
   verifyRemark:  String,
   approvedBy:    String,
@@ -60,6 +61,10 @@ const GRNReceiptSchema = new Schema({
   rejectedBy:    String,
   rejectedAt:    String,
   rejectReason:  String,
+  mismatchReason:     String,
+  mismatchFlaggedBy:  String,
+  mismatchFlaggedById: String,
+  mismatchFlaggedAt:  String,
   payment:       GRNPaymentSchema,
 }, { _id: false });
 
@@ -87,10 +92,11 @@ const GRNSchema = new Schema({
   // Payment tracking (Accounts)
   isLocked:           { type: Boolean, default: false },
   lockedAt:           String,
-  paymentStatus:      { type: String, enum: ["unpaid", "bill_verified", "bill_approved", "bill_rejected", "payment_pending", "paid"], default: "unpaid" },
+  paymentStatus:      { type: String, enum: ["unpaid", "bill_verified", "bill_approved", "bill_rejected", "mismatch_pending", "payment_pending", "paid"], default: "unpaid" },
   invoiceNo:          String,
   invoiceAmount:      Number,
   verifiedBy:         String,
+  verifiedById:       String,
   verifiedAt:         String,
   verifyRemark:       String,
   approvedBy:         String,
@@ -98,6 +104,10 @@ const GRNSchema = new Schema({
   rejectedBy:         String,
   rejectedAt:         String,
   rejectReason:       String,
+  mismatchReason:     String,
+  mismatchFlaggedBy:  String,
+  mismatchFlaggedById: String,
+  mismatchFlaggedAt:  String,
   payment:            GRNPaymentSchema,
   // Merge tracking — set when this GRN is folded into another
   mergedInto:         { type: String, default: null },

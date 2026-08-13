@@ -1087,6 +1087,7 @@ router.put("/:id/bill-verify", authenticate, async (req, res) => {
     }
     grn.paymentStatus = "bill_verified";
     grn.verifiedBy    = req.user.name;
+    grn.verifiedById  = String(req.user._id);
     grn.verifiedAt    = new Date().toISOString();
     grn.invoiceAmount = Number(invoiceAmount);
     if (remark)    grn.verifyRemark = remark;
@@ -1312,6 +1313,7 @@ router.put("/:id/receipt/:idx/bill-verify", authenticate, async (req, res) => {
     }
     grn.receipts[idx].paymentStatus = "bill_verified";
     grn.receipts[idx].verifiedBy    = req.user.name;
+    grn.receipts[idx].verifiedById  = String(req.user._id);
     grn.receipts[idx].verifiedAt    = new Date().toISOString();
     grn.receipts[idx].invoiceAmount = Number(invoiceAmount);
     if (remark)    grn.receipts[idx].verifyRemark = remark;
@@ -1457,6 +1459,159 @@ router.put("/:id/receipt/:idx/bill-verify-revert", authenticate, async (req, res
     broadcast({ type: "DATA_UPDATED", path: "grn" });
     res.json({ success: true });
   } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ─── Mismatch flow routes ────────────────────────────────────────────────────
+
+// PUT /grns/:id/flag-mismatch — Doer flags mismatch after L1/L2 rejection
+router.put("/:id/flag-mismatch", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) return res.status(403).json({ success: false, message: "Unauthorized" });
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus !== "bill_rejected") return res.status(400).json({ success: false, message: "Can only flag mismatch on a rejected shipment" });
+    if (grn.verifiedById && String(grn.verifiedById) !== String(req.user._id))
+      return res.status(403).json({ success: false, message: "Only the original verifier (Doer) can flag a mismatch" });
+    const { reason } = req.body;
+    if (!reason?.trim()) return res.status(400).json({ success: false, message: "Mismatch reason is required" });
+    grn.paymentStatus       = "mismatch_pending";
+    grn.mismatchReason      = reason.trim();
+    grn.mismatchFlaggedBy   = req.user.name;
+    grn.mismatchFlaggedById = String(req.user._id);
+    grn.mismatchFlaggedAt   = new Date().toISOString();
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { paymentStatus: "mismatch_pending", reason });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN flag-mismatch error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/receipt/:idx/flag-mismatch
+router.put("/:id/receipt/:idx/flag-mismatch", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) return res.status(403).json({ success: false, message: "Unauthorized" });
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt not found" });
+    if (receipt.paymentStatus !== "bill_rejected") return res.status(400).json({ success: false, message: "Can only flag mismatch on a rejected shipment" });
+    if (receipt.verifiedById && String(receipt.verifiedById) !== String(req.user._id))
+      return res.status(403).json({ success: false, message: "Only the original verifier (Doer) can flag a mismatch" });
+    const { reason } = req.body;
+    if (!reason?.trim()) return res.status(400).json({ success: false, message: "Mismatch reason is required" });
+    grn.receipts[idx].paymentStatus       = "mismatch_pending";
+    grn.receipts[idx].mismatchReason      = reason.trim();
+    grn.receipts[idx].mismatchFlaggedBy   = req.user.name;
+    grn.receipts[idx].mismatchFlaggedById = String(req.user._id);
+    grn.receipts[idx].mismatchFlaggedAt   = new Date().toISOString();
+    grn.markModified("receipts");
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_mismatch_flagged", receiptIdx: idx, reason });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN receipt flag-mismatch error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/mismatch-approve — AGM approves mismatch → bill_verified
+router.put("/:id/mismatch-approve", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_PAYMENT_AGM")) return res.status(403).json({ success: false, message: "Unauthorized" });
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus !== "mismatch_pending") return res.status(400).json({ success: false, message: "Shipment is not in mismatch_pending state" });
+    grn.paymentStatus = "bill_verified";
+    grn.approvedBy    = req.user.name;
+    grn.approvedAt    = new Date().toISOString();
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { paymentStatus: "bill_verified", action: "mismatch_approved" });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN mismatch-approve error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/receipt/:idx/mismatch-approve
+router.put("/:id/receipt/:idx/mismatch-approve", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_PAYMENT_AGM")) return res.status(403).json({ success: false, message: "Unauthorized" });
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt not found" });
+    if (receipt.paymentStatus !== "mismatch_pending") return res.status(400).json({ success: false, message: "Receipt is not in mismatch_pending state" });
+    grn.receipts[idx].paymentStatus = "bill_verified";
+    grn.receipts[idx].approvedBy    = req.user.name;
+    grn.receipts[idx].approvedAt    = new Date().toISOString();
+    grn.markModified("receipts");
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_mismatch_approved", receiptIdx: idx });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN receipt mismatch-approve error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/mismatch-revise — AGM sends for PO revision (company/bank/vendor mismatch)
+router.put("/:id/mismatch-revise", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_PAYMENT_AGM")) return res.status(403).json({ success: false, message: "Unauthorized" });
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus !== "mismatch_pending") return res.status(400).json({ success: false, message: "Shipment is not in mismatch_pending state" });
+    // Flag the PO for revision
+    if (grn.poId) {
+      await PurchaseOrder.updateOne({ id: grn.poId }, { $set: { status: "Pending Revision", revisionReason: grn.mismatchReason, revisionRequestedBy: req.user.name, revisionRequestedAt: new Date().toISOString() } });
+      broadcast({ type: "DATA_UPDATED", path: "purchase-orders" });
+    }
+    grn.paymentStatus = "bill_rejected";
+    grn.rejectReason  = `PO sent for revision: ${grn.mismatchReason}`;
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "mismatch_sent_for_revision", poId: grn.poId });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN mismatch-revise error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/receipt/:idx/mismatch-revise
+router.put("/:id/receipt/:idx/mismatch-revise", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "APPROVE_PAYMENT_AGM")) return res.status(403).json({ success: false, message: "Unauthorized" });
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt not found" });
+    if (receipt.paymentStatus !== "mismatch_pending") return res.status(400).json({ success: false, message: "Receipt is not in mismatch_pending state" });
+    if (grn.poId) {
+      await PurchaseOrder.updateOne({ id: grn.poId }, { $set: { status: "Pending Revision", revisionReason: receipt.mismatchReason, revisionRequestedBy: req.user.name, revisionRequestedAt: new Date().toISOString() } });
+      broadcast({ type: "DATA_UPDATED", path: "purchase-orders" });
+    }
+    grn.receipts[idx].paymentStatus = "bill_rejected";
+    grn.receipts[idx].rejectReason  = `PO sent for revision: ${receipt.mismatchReason}`;
+    grn.markModified("receipts");
+    await grn.save();
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_mismatch_sent_for_revision", receiptIdx: idx, poId: grn.poId });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN receipt mismatch-revise error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
