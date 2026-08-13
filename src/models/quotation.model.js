@@ -52,5 +52,10 @@ QuotationSchema.index({ mrId: 1 });
 QuotationSchema.index({ supplierName: 1 });
 QuotationSchema.index({ status: 1 });
 QuotationSchema.index({ updatedAt: -1 });
+QuotationSchema.index({ mrId: 1, status: 1 });
+QuotationSchema.index({ supplierId: 1 });
+QuotationSchema.index({ linkedPoId: 1 });
+QuotationSchema.index({ category: 1 });
+QuotationSchema.index({ createdAt: -1 });
 
 export const Quotation = mongoose.model("Quotation", QuotationSchema);

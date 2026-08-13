@@ -130,6 +130,11 @@ const InwardReturnSchema = new Schema({
   items:            { type: [TransactionItemSchema], required: true },
 }, { timestamps: true });
 
+InwardReturnSchema.index({ project: 1 });
+InwardReturnSchema.index({ supplier: 1 });
+InwardReturnSchema.index({ store: 1 });
+InwardReturnSchema.index({ createdAt: -1 });
+
 export const InwardReturn = mongoose.model("InwardReturn", InwardReturnSchema);
 
 const OutwardReturnSchema = new Schema({
@@ -147,6 +152,11 @@ const OutwardReturnSchema = new Schema({
   materialPhotoUrl: String,
   items:            { type: [TransactionItemSchema], required: true },
 }, { timestamps: true });
+
+OutwardReturnSchema.index({ project: 1 });
+OutwardReturnSchema.index({ sourceSite: 1 });
+OutwardReturnSchema.index({ store: 1 });
+OutwardReturnSchema.index({ createdAt: -1 });
 
 export const OutwardReturn = mongoose.model("OutwardReturn", OutwardReturnSchema);
 
@@ -191,5 +201,9 @@ TransactionSchema.index({ mrId: 1 });
 TransactionSchema.index({ poId: 1 });
 TransactionSchema.index({ createdAt: -1 });
 TransactionSchema.index({ updatedAt: -1 });
+TransactionSchema.index({ supplier: 1 });
+TransactionSchema.index({ linkId: 1 });
+TransactionSchema.index({ project: 1, type: 1 });
+TransactionSchema.index({ createdBy: 1 });
 
 export const Transaction = mongoose.model("Transaction", TransactionSchema);

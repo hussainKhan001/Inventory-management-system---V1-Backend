@@ -46,6 +46,10 @@ MaterialRequirementSchema.index({ status: 1 });
 MaterialRequirementSchema.index({ status: 1, createdAt: -1 });
 MaterialRequirementSchema.index({ createdAt: -1 });
 MaterialRequirementSchema.index({ updatedAt: -1 });
+MaterialRequirementSchema.index({ mrNumber: 1 });
+MaterialRequirementSchema.index({ engineerId: 1 });
+MaterialRequirementSchema.index({ planId: 1 });
+MaterialRequirementSchema.index({ project: 1, status: 1 });
 
 export const MaterialRequirement = mongoose.model("MaterialRequirement", MaterialRequirementSchema);
 
@@ -70,5 +74,8 @@ const MRAllocationSchema = new Schema({
 
 MRAllocationSchema.index({ mrId: 1 });
 MRAllocationSchema.index({ sku: 1 });
+MRAllocationSchema.index({ status: 1 });
+MRAllocationSchema.index({ sku: 1, status: 1 });
+MRAllocationSchema.index({ mrId: 1, sku: 1 });
 
 export const MRAllocation = mongoose.model("MRAllocation", MRAllocationSchema);

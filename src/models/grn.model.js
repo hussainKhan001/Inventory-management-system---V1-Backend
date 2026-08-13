@@ -112,5 +112,10 @@ GRNSchema.index({ mrNo: 1 });
 GRNSchema.index({ poId: 1, status: 1 });
 GRNSchema.index({ createdAt: -1 });
 GRNSchema.index({ updatedAt: -1 });
+GRNSchema.index({ paymentStatus: 1 });
+GRNSchema.index({ isActive: 1 });
+GRNSchema.index({ project: 1, status: 1 });
+GRNSchema.index({ store: 1 });
+GRNSchema.index({ destinationProject: 1 });
 
 export const GRN = mongoose.model("GRN", GRNSchema);
