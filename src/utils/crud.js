@@ -19,7 +19,7 @@ import { getNextSequence } from "./sequence.js";
 import { getRolesWithPermission, createNotification } from "./notification.js";
 import { triggerN8nWebhook } from "./webhook.js";
 import { broadcast } from "./broadcaster.js";
-import { PurchaseOrder, MaterialRequirement, Quotation, MRAllocation, Transaction, Settings } from "../models/index.js";
+import { PurchaseOrder, MaterialRequirement, Quotation, MRAllocation, Transaction, Settings, GRN } from "../models/index.js";
 import { POService } from "../services/po.service.js";
 import { logAudit, buildDiff } from "./audit.js";
 const cascadeDeleteMR = /* @__PURE__ */ __name(async (mrId) => {
@@ -404,6 +404,25 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
       // (arrays/objects) that Mongoose won't track automatically
       Object.keys(data).forEach(key => oldItem.markModified(key));
       const item = await oldItem.save();
+      // When PO items change, recalculate status of all linked GRNs so removed items don't keep them "Partial"
+      if (resourceName === "pos" && data.items) {
+        const updatedPoItems = item.items || [];
+        const linkedGrns = await GRN.find({ poId: item.id, status: { $ne: "Merged" }, isActive: { $ne: false } });
+        for (const linkedGrn of linkedGrns) {
+          const grnReceivedMap = new Map((linkedGrn.items || []).map(i => [i.sku, i.received || 0]));
+          let anyShort = false, anyOver = false;
+          for (const poItem of updatedPoItems) {
+            const received = grnReceivedMap.get(poItem.sku) || 0;
+            const ordered = poItem.qty || 0;
+            if (received < ordered) anyShort = true;
+            if (received > ordered) anyOver = true;
+          }
+          const newGrnStatus = anyOver ? "Over-Received" : anyShort ? "Partial" : "Confirmed";
+          if (newGrnStatus !== linkedGrn.status) {
+            await GRN.updateOne({ id: linkedGrn.id }, { status: newGrnStatus });
+          }
+        }
+      }
       broadcast({ type: "DATA_UPDATED", path: resourceName });
       // Only log fields whose value actually changed (skip internal/noise keys)
       const SKIP_AUDIT_KEYS = new Set(["_id", "__v", "updatedAt", "createdAt", "auditTrail", "id"]);

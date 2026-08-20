@@ -6,6 +6,7 @@ import path from "path";
 import fs from "fs";
 import multer from "multer";
 import { PurchaseOrder, Quotation, MaterialRequirement, Supplier, Settings } from "../models/index.js";
+import { GRN } from "../models/grn.model.js";
 import { authenticate, serverHasPermission } from "../middleware/auth.middleware.js";
 import { getRolesWithPermission, createNotification } from "../utils/notification.js";
 import { triggerN8nWebhook, sendSlackFile } from "../utils/webhook.js";
@@ -349,6 +350,133 @@ router.post("/:id/pdf-slack", authenticate, pdfUpload.single("pdf"), async (req,
   } catch (error) {
     logger.error("Error in pdf-slack endpoint:", error);
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Submit revision — PO creator submits corrections; directly approved, GRNs reset for Doer re-verify
+router.put("/:id/submit-revision", authenticate, async (req, res) => {
+  try {
+    const po = await PurchaseOrder.findOne({ id: req.params.id });
+    if (!po) return res.status(404).json({ success: false, message: "PO not found" });
+    if (po.status !== "Pending Revision") return res.status(400).json({ success: false, message: "PO is not pending revision" });
+
+    const {
+      supplier, companyName, companyGst, companyAddress,
+      vendorBankDetails, vendorContact, vendorEmail, vendorAddress,
+      items, totalValue, remark,
+    } = req.body;
+
+    const timestamp = new Date().toISOString();
+    // Move PO to a GRN-eligible status so AccountsPage picks it up for accounts team approval
+    const updatableFields = {
+      status: "Ready for Payment",
+      revisionSubmittedBy: req.user?.name || "Unknown",
+      revisionSubmittedAt: timestamp,
+    };
+    if (supplier !== undefined)           updatableFields.supplier = supplier;
+    if (companyName !== undefined)        updatableFields.companyName = companyName;
+    if (companyGst !== undefined)         updatableFields.companyGst = companyGst;
+    if (companyAddress !== undefined)     updatableFields.companyAddress = companyAddress;
+    if (vendorBankDetails !== undefined)  updatableFields.vendorBankDetails = vendorBankDetails;
+    if (vendorContact !== undefined)      updatableFields.vendorContact = vendorContact;
+    if (vendorEmail !== undefined)        updatableFields.vendorEmail = vendorEmail;
+    if (vendorAddress !== undefined)      updatableFields.vendorAddress = vendorAddress;
+    if (items !== undefined)              updatableFields.items = items;
+    if (totalValue !== undefined)         updatableFields.totalValue = totalValue;
+    if (remark !== undefined)             updatableFields.remark = remark;
+
+    po.set(updatableFields);
+    await po.save({ validateModifiedOnly: true });
+    // GRNs stay bill_rejected — accounts team must explicitly approve via approve-revision
+
+    logAudit(req.user, "UPDATE", "PurchaseOrder", po.id, { action: "revision_submitted" });
+    broadcast({ type: "DATA_UPDATED", path: "pos" });
+    res.json({ success: true, message: "Revision submitted. Accounts team will approve before Doer can re-verify." });
+  } catch (error) {
+    logger.error("Submit revision error:", error);
+    res.status(500).json({ success: false, message: error.message || "Failed to submit revision" });
+  }
+});
+
+// POST /:id/approve-revision — L2 approver approves the revised PO, resets GRNs to unpaid for Doer re-verification
+router.post("/:id/approve-revision", authenticate, async (req, res) => {
+  try {
+    const po = await PurchaseOrder.findOne({ id: req.params.id });
+    if (!po) return res.status(404).json({ success: false, message: "PO not found" });
+    if (!po.revisionSubmittedAt) {
+      return res.status(400).json({ success: false, message: "PO has no pending revision" });
+    }
+
+    const timestamp = new Date().toISOString();
+    // Approve revision — preserve original L1/L2/L3 approval stamps; track revision approval separately
+    po.set({
+      status: "Approved",
+      revisionApprovedBy: req.user?.name || "Unknown",
+      revisionApprovedAt: timestamp,
+    });
+    await po.save({ validateModifiedOnly: true });
+
+    // Reset all linked bill_rejected GRN shipments to unpaid so Doer re-verifies against revised PO
+    const linkedGRNs = await GRN.find({ poId: po.id });
+    for (const grn of linkedGRNs) {
+      let changed = false;
+      if (["bill_rejected", "mismatch_pending"].includes(grn.paymentStatus)) {
+        grn.paymentStatus = "unpaid";
+        grn.rejectReason = "";
+        grn.rejectedBy = "";
+        grn.rejectedAt = "";
+        changed = true;
+      }
+      for (const r of (grn.receipts || [])) {
+        if (["bill_rejected", "mismatch_pending"].includes(r.paymentStatus)) {
+          r.paymentStatus = "unpaid";
+          r.rejectReason = "";
+          r.rejectedBy = "";
+          r.rejectedAt = "";
+          changed = true;
+        }
+      }
+      if (changed) await grn.save({ validateModifiedOnly: true });
+    }
+
+    logAudit(req.user, "UPDATE", "PurchaseOrder", po.id, { action: "revision_approved_l2" });
+    broadcast({ type: "DATA_UPDATED", path: "pos" });
+    broadcast({ type: "DATA_UPDATED", path: "grns" });
+    res.json({ success: true, message: "Revision approved. Doer can now re-verify the bill." });
+  } catch (error) {
+    logger.error("Approve revision error:", error);
+    res.status(500).json({ success: false, message: error.message || "Failed to approve revision" });
+  }
+});
+
+// POST /:id/reject-revision — L2 sends revised PO back to owner for another round of revisions
+router.post("/:id/reject-revision", authenticate, async (req, res) => {
+  try {
+    const po = await PurchaseOrder.findOne({ id: req.params.id });
+    if (!po) return res.status(404).json({ success: false, message: "PO not found" });
+    if (!["Pending L1", "Pending L2", "Ready for Payment"].includes(po.status) || !po.revisionSubmittedAt) {
+      return res.status(400).json({ success: false, message: "PO is not awaiting revision approval" });
+    }
+
+    const { reason = "" } = req.body;
+    const timestamp = new Date().toISOString();
+    po.set({
+      status: "Pending Revision",
+      approvalL2: "Pending",
+      revisionSubmittedBy: undefined,
+      revisionSubmittedAt: undefined,
+      revisionRejectedBy: req.user?.name || "L2 Approver",
+      revisionRejectedAt: timestamp,
+      revisionRejectedReason: reason,
+    });
+    await po.save({ validateModifiedOnly: true });
+
+    logAudit(req.user, "UPDATE", "PurchaseOrder", po.id, { action: "revision_rejected_l2", reason });
+    broadcast({ type: "DATA_UPDATED", path: "pos" });
+    res.json({ success: true, message: "Revision rejected. PO owner must revise again." });
+  } catch (error) {
+    logger.error("Reject revision error:", error);
+    res.status(500).json({ success: false, message: error.message || "Failed to reject revision" });
   }
 });
 

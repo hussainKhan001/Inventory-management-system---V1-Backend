@@ -65,6 +65,8 @@ const GRNReceiptSchema = new Schema({
   mismatchFlaggedBy:  String,
   mismatchFlaggedById: String,
   mismatchFlaggedAt:  String,
+  reVerifyApprovedBy: String,
+  reVerifyApprovedAt: String,
   payment:       GRNPaymentSchema,
 }, { _id: false });
 
@@ -108,6 +110,8 @@ const GRNSchema = new Schema({
   mismatchFlaggedBy:  String,
   mismatchFlaggedById: String,
   mismatchFlaggedAt:  String,
+  reVerifyApprovedBy: String,
+  reVerifyApprovedAt: String,
   payment:            GRNPaymentSchema,
   // Merge tracking — set when this GRN is folded into another
   mergedInto:         { type: String, default: null },

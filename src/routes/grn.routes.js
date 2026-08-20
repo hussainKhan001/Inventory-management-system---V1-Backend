@@ -956,12 +956,25 @@ router.post("/migrate-status", authenticate, async (req, res) => {
     if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
       return res.status(403).json({ success: false, message: "Super Admin only" });
     }
-    const grns = await GRN.find({ status: { $ne: "Merged" }, isActive: { $ne: false } }, { id: 1, items: 1, status: 1 }).lean();
+    const grns = await GRN.find({ status: { $ne: "Merged" }, isActive: { $ne: false } }, { id: 1, poId: 1, items: 1, status: 1 }).lean();
     let updated = 0;
     for (const grn of grns) {
-      const hasShortage = (grn.items || []).some((it) => (it.received || 0) < (it.ordered || 0));
-      const hasExcess   = (grn.items || []).some((it) => (it.received || 0) > (it.ordered || 0));
-      const newStatus   = hasShortage ? "Partial" : hasExcess ? "Over-Received" : "Confirmed";
+      let anyShort = false, anyOver = false;
+      if (grn.poId) {
+        // Compare only against items still in the current PO — removed items are ignored
+        const linkedPO = await PurchaseOrder.findOne({ id: grn.poId }, { items: 1 }).lean();
+        const grnMap = new Map((grn.items || []).map(i => [i.sku, i.received || 0]));
+        for (const poItem of (linkedPO?.items || [])) {
+          const received = grnMap.get(poItem.sku) || 0;
+          const ordered  = poItem.qty || 0;
+          if (received < ordered) anyShort = true;
+          if (received > ordered) anyOver  = true;
+        }
+      } else {
+        anyShort = (grn.items || []).some((it) => (it.received || 0) < (it.ordered || 0));
+        anyOver  = (grn.items || []).some((it) => (it.received || 0) > (it.ordered || 0));
+      }
+      const newStatus = anyShort ? "Partial" : anyOver ? "Over-Received" : "Confirmed";
       if (newStatus !== grn.status) {
         await GRN.updateOne({ id: grn.id }, { status: newStatus });
         updated++;
@@ -1080,7 +1093,7 @@ router.put("/:id/bill-verify", authenticate, async (req, res) => {
           const total = gstType === "Exclusive" ? base * (1 + gstPct / 100) : base;
           return sum + total;
         }, 0);
-        if (grnValue > 0 && Number(invoiceAmount) > grnValue + 0.5) {
+        if (grnValue > 0 && Number(invoiceAmount) > grnValue + 0.5 && !grn.reVerifyApprovedBy) {
           return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${grnValue.toLocaleString("en-IN")}` });
         }
       }
@@ -1090,6 +1103,8 @@ router.put("/:id/bill-verify", authenticate, async (req, res) => {
     grn.verifiedById  = String(req.user._id);
     grn.verifiedAt    = new Date().toISOString();
     grn.invoiceAmount = Number(invoiceAmount);
+    grn.reVerifyApprovedBy = null;
+    grn.reVerifyApprovedAt = null;
     if (remark)    grn.verifyRemark = remark;
     if (invoiceNo) grn.invoiceNo    = invoiceNo;
     await grn.save();
@@ -1248,7 +1263,8 @@ router.put("/:id/receipt/:idx/bill-reject", authenticate, async (req, res) => {
 // PUT /grns/:id/bill-verify-revert — Revert root shipment back to unpaid
 router.put("/:id/bill-verify-revert", authenticate, async (req, res) => {
   try {
-    if (!await serverHasPermission(req.user, "VERIFY_BILL")) {
+    const requiredPerm = req.body?.approveReVerify ? "APPROVE_REVERIFY" : "VERIFY_BILL";
+    if (!await serverHasPermission(req.user, requiredPerm)) {
       return res.status(403).json({ success: false, message: "Unauthorized" });
     }
     const grn = await GRN.findOne({ id: req.params.id });
@@ -1258,6 +1274,10 @@ router.put("/:id/bill-verify-revert", authenticate, async (req, res) => {
     grn.verifiedBy = null; grn.verifiedAt = null; grn.verifyRemark = null;
     grn.approvedBy = null; grn.approvedAt = null;
     grn.invoiceAmount = null; grn.invoiceNo = null;
+    if (req.body?.approveReVerify) {
+      grn.reVerifyApprovedBy = req.user.name;
+      grn.reVerifyApprovedAt = new Date().toISOString();
+    }
     await grn.save();
     broadcast({ type: "DATA_UPDATED", path: "grn" });
     res.json({ success: true });
@@ -1306,7 +1326,7 @@ router.put("/:id/receipt/:idx/bill-verify", authenticate, async (req, res) => {
           const total = gstType === "Exclusive" ? base * (1 + gstPct / 100) : base;
           return sum + total;
         }, 0);
-        if (receiptValue > 0 && Number(invoiceAmount) > receiptValue + 0.5) {
+        if (receiptValue > 0 && Number(invoiceAmount) > receiptValue + 0.5 && !receipt.reVerifyApprovedBy) {
           return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${receiptValue.toLocaleString("en-IN")}` });
         }
       }
@@ -1316,6 +1336,8 @@ router.put("/:id/receipt/:idx/bill-verify", authenticate, async (req, res) => {
     grn.receipts[idx].verifiedById  = String(req.user._id);
     grn.receipts[idx].verifiedAt    = new Date().toISOString();
     grn.receipts[idx].invoiceAmount = Number(invoiceAmount);
+    grn.receipts[idx].reVerifyApprovedBy = null;
+    grn.receipts[idx].reVerifyApprovedAt = null;
     if (remark)    grn.receipts[idx].verifyRemark = remark;
     if (invoiceNo) grn.receipts[idx].invoiceNo    = invoiceNo;
     grn.markModified("receipts");
@@ -1437,7 +1459,8 @@ router.delete("/:id/receipt/:idx/payment", authenticate, async (req, res) => {
 // PUT /grns/:id/receipt/:idx/bill-verify-revert
 router.put("/:id/receipt/:idx/bill-verify-revert", authenticate, async (req, res) => {
   try {
-    if (!await serverHasPermission(req.user, "VERIFY_BILL")) {
+    const requiredPerm = req.body?.approveReVerify ? "APPROVE_REVERIFY" : "VERIFY_BILL";
+    if (!await serverHasPermission(req.user, requiredPerm)) {
       return res.status(403).json({ success: false, message: "Unauthorized" });
     }
     const grn = await GRN.findOne({ id: req.params.id });
@@ -1454,6 +1477,10 @@ router.put("/:id/receipt/:idx/bill-verify-revert", authenticate, async (req, res
     grn.receipts[idx].approvedAt    = null;
     grn.receipts[idx].invoiceAmount = null;
     grn.receipts[idx].invoiceNo     = null;
+    if (req.body?.approveReVerify) {
+      grn.receipts[idx].reVerifyApprovedBy = req.user.name;
+      grn.receipts[idx].reVerifyApprovedAt = new Date().toISOString();
+    }
     grn.markModified("receipts");
     await grn.save();
     broadcast({ type: "DATA_UPDATED", path: "grn" });
@@ -1612,6 +1639,66 @@ router.put("/:id/receipt/:idx/mismatch-revise", authenticate, async (req, res) =
     res.json({ success: true });
   } catch (error) {
     logger.error("GRN receipt mismatch-revise error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/doer-send-revision — Doer sends PO for revision directly from verify screen (unpaid)
+router.put("/:id/doer-send-revision", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) return res.status(403).json({ success: false, message: "Unauthorized" });
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    if (grn.paymentStatus !== "unpaid") return res.status(400).json({ success: false, message: "Can only send for revision from unpaid state" });
+    const { reason } = req.body;
+    if (!reason?.trim()) return res.status(400).json({ success: false, message: "Revision reason is required" });
+    const timestamp = new Date().toISOString();
+    grn.paymentStatus = "bill_rejected";
+    grn.rejectReason  = `PO revision requested by Doer: ${reason.trim()}`;
+    grn.rejectedBy    = req.user.name;
+    grn.rejectedAt    = timestamp;
+    await grn.save();
+    if (grn.poId) {
+      await PurchaseOrder.updateOne({ id: grn.poId }, { $set: { status: "Pending Revision", revisionReason: reason.trim(), revisionRequestedBy: req.user.name, revisionRequestedAt: timestamp } });
+      broadcast({ type: "DATA_UPDATED", path: "pos" });
+    }
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "doer_sent_for_revision", reason });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN doer-send-revision error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /grns/:id/receipt/:idx/doer-send-revision
+router.put("/:id/receipt/:idx/doer-send-revision", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VERIFY_BILL")) return res.status(403).json({ success: false, message: "Unauthorized" });
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
+    const idx = parseInt(req.params.idx);
+    const receipt = grn.receipts?.[idx];
+    if (!receipt) return res.status(404).json({ success: false, message: "Receipt not found" });
+    if (receipt.paymentStatus !== "unpaid") return res.status(400).json({ success: false, message: "Can only send for revision from unpaid state" });
+    const { reason } = req.body;
+    if (!reason?.trim()) return res.status(400).json({ success: false, message: "Revision reason is required" });
+    const timestamp = new Date().toISOString();
+    grn.receipts[idx].paymentStatus = "bill_rejected";
+    grn.receipts[idx].rejectReason  = `PO revision requested by Doer: ${reason.trim()}`;
+    grn.receipts[idx].rejectedBy    = req.user.name;
+    grn.receipts[idx].rejectedAt    = timestamp;
+    grn.markModified("receipts");
+    await grn.save();
+    if (grn.poId) {
+      await PurchaseOrder.updateOne({ id: grn.poId }, { $set: { status: "Pending Revision", revisionReason: reason.trim(), revisionRequestedBy: req.user.name, revisionRequestedAt: timestamp } });
+      broadcast({ type: "DATA_UPDATED", path: "pos" });
+    }
+    logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_doer_sent_for_revision", receiptIdx: idx, reason });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error("GRN receipt doer-send-revision error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
