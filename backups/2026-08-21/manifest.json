@@ -1,0 +1,179 @@
+{
+  "timestamp": "2026-08-21T04:34:30.605Z",
+  "date": "2026-08-21",
+  "totalCollections": 34,
+  "totalDocs": 25952,
+  "totalSizeKB": 3158,
+  "collections": [
+    {
+      "name": "gstrates",
+      "docs": 5,
+      "sizeKB": 0.2
+    },
+    {
+      "name": "inventories",
+      "docs": 7612,
+      "sizeKB": 296.5
+    },
+    {
+      "name": "vendors",
+      "docs": 253,
+      "sizeKB": 61.7
+    },
+    {
+      "name": "materialtransferoutwards",
+      "docs": 5,
+      "sizeKB": 1.1
+    },
+    {
+      "name": "purchaseorders",
+      "docs": 532,
+      "sizeKB": 210.2
+    },
+    {
+      "name": "procurementtasks",
+      "docs": 225,
+      "sizeKB": 16.8
+    },
+    {
+      "name": "quotations",
+      "docs": 711,
+      "sizeKB": 94
+    },
+    {
+      "name": "accounts",
+      "docs": 0,
+      "sizeKB": 0
+    },
+    {
+      "name": "outwards",
+      "docs": 2040,
+      "sizeKB": 409.4
+    },
+    {
+      "name": "settings",
+      "docs": 1,
+      "sizeKB": 2.4
+    },
+    {
+      "name": "writeoffs",
+      "docs": 0,
+      "sizeKB": 0
+    },
+    {
+      "name": "suppliergroups",
+      "docs": 0,
+      "sizeKB": 0
+    },
+    {
+      "name": "inwards",
+      "docs": 1202,
+      "sizeKB": 208.8
+    },
+    {
+      "name": "transactions",
+      "docs": 3163,
+      "sizeKB": 601.8
+    },
+    {
+      "name": "rolepermissions",
+      "docs": 22,
+      "sizeKB": 2.5
+    },
+    {
+      "name": "slackmessagerefs",
+      "docs": 0,
+      "sizeKB": 0
+    },
+    {
+      "name": "outwardreturns",
+      "docs": 31,
+      "sizeKB": 9.1
+    },
+    {
+      "name": "formconfigs",
+      "docs": 7,
+      "sizeKB": 1.2
+    },
+    {
+      "name": "notifications",
+      "docs": 8921,
+      "sizeKB": 423.4
+    },
+    {
+      "name": "dieselconsumptions",
+      "docs": 0,
+      "sizeKB": 0
+    },
+    {
+      "name": "mrs",
+      "docs": 1,
+      "sizeKB": 0.2
+    },
+    {
+      "name": "materialtransferinwards",
+      "docs": 1,
+      "sizeKB": 0.4
+    },
+    {
+      "name": "grns",
+      "docs": 444,
+      "sizeKB": 685.7
+    },
+    {
+      "name": "stockcheckreports",
+      "docs": 6,
+      "sizeKB": 0.7
+    },
+    {
+      "name": "counters",
+      "docs": 14,
+      "sizeKB": 0.6
+    },
+    {
+      "name": "suppliers",
+      "docs": 0,
+      "sizeKB": 0
+    },
+    {
+      "name": "mrallocations",
+      "docs": 0,
+      "sizeKB": 0
+    },
+    {
+      "name": "materialrequirements",
+      "docs": 700,
+      "sizeKB": 124
+    },
+    {
+      "name": "materialplans",
+      "docs": 5,
+      "sizeKB": 0.9
+    },
+    {
+      "name": "catalogues",
+      "docs": 2,
+      "sizeKB": 0.3
+    },
+    {
+      "name": "returns",
+      "docs": 3,
+      "sizeKB": 0.3
+    },
+    {
+      "name": "inwardreturns",
+      "docs": 10,
+      "sizeKB": 1.9
+    },
+    {
+      "name": "users",
+      "docs": 36,
+      "sizeKB": 3.7
+    },
+    {
+      "name": "materialplanrevisions",
+      "docs": 0,
+      "sizeKB": 0
+    }
+  ]
+}

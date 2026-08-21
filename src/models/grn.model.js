@@ -51,7 +51,10 @@ const GRNReceiptSchema = new Schema({
   // Per-receipt payment tracking
   paymentStatus: { type: String, enum: ["unpaid", "bill_verified", "bill_approved", "bill_rejected", "mismatch_pending", "payment_pending", "paid"], default: "unpaid" },
   invoiceNo:     String,
-  invoiceAmount: Number,
+  invoiceAmount:   Number,
+  freightAmount:   Number,
+  loadingAmount:   Number,
+  unloadingAmount: Number,
   verifiedBy:    String,
   verifiedById:  String,
   verifiedAt:    String,

@@ -1074,9 +1074,9 @@ router.put("/:id/bill-verify", authenticate, async (req, res) => {
     const grn = await GRN.findOne({ id: req.params.id });
     if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
     if (grn.paymentStatus === "paid") return res.status(400).json({ success: false, message: "This shipment is locked — already paid" });
-    const { remark, invoiceNo, invoiceAmount } = req.body;
+    const { remark, invoiceNo, invoiceAmount, freightAmount, loadingAmount, unloadingAmount } = req.body;
     if (!invoiceAmount || Number(invoiceAmount) <= 0) return res.status(400).json({ success: false, message: "Invoice amount is required and must be greater than 0" });
-    // Validate invoiceAmount does not exceed computed shipment value
+    // Validate invoiceAmount does not exceed computed shipment value + freight/loading/unloading
     if (grn.poId) {
       const po = await PurchaseOrder.findOne({ id: grn.poId });
       if (po) {
@@ -1093,8 +1093,12 @@ router.put("/:id/bill-verify", authenticate, async (req, res) => {
           const total = gstType === "Exclusive" ? base * (1 + gstPct / 100) : base;
           return sum + total;
         }, 0);
-        if (grnValue > 0 && Number(invoiceAmount) > grnValue + 0.5 && !grn.reVerifyApprovedBy) {
-          return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${grnValue.toLocaleString("en-IN")}` });
+        const freight   = Number(freightAmount)   || 0;
+        const loading   = Number(loadingAmount)   || 0;
+        const unloading = Number(unloadingAmount) || 0;
+        const extraCharges = freight + loading + unloading;
+        if (grnValue > 0 && Number(invoiceAmount) > grnValue + extraCharges + 0.5 && !grn.reVerifyApprovedBy) {
+          return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${(grnValue + extraCharges).toLocaleString("en-IN")}` });
         }
       }
     }
@@ -1105,8 +1109,11 @@ router.put("/:id/bill-verify", authenticate, async (req, res) => {
     grn.invoiceAmount = Number(invoiceAmount);
     grn.reVerifyApprovedBy = null;
     grn.reVerifyApprovedAt = null;
-    if (remark)    grn.verifyRemark = remark;
-    if (invoiceNo) grn.invoiceNo    = invoiceNo;
+    if (remark)    grn.verifyRemark  = remark;
+    if (invoiceNo) grn.invoiceNo     = invoiceNo;
+    if (freightAmount   !== undefined) grn.freightAmount   = Number(freightAmount)   || 0;
+    if (loadingAmount   !== undefined) grn.loadingAmount   = Number(loadingAmount)   || 0;
+    if (unloadingAmount !== undefined) grn.unloadingAmount = Number(unloadingAmount) || 0;
     await grn.save();
     logAudit(req.user, "UPDATE", "GRN", grn.id, { paymentStatus: "bill_verified" });
     broadcast({ type: "DATA_UPDATED", path: "grn" });

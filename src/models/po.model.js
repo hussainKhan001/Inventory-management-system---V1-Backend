@@ -31,6 +31,7 @@ const PaymentTimelineSchema = new Schema({
 const POSchema = new Schema({
   id:          { type: String, required: true, unique: true },
   mrId:        String,
+  planId:      String,
   quotationId: String,
   project:     String,
   phase:       String,

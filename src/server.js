@@ -45,6 +45,8 @@ import accountsRoutes from "./routes/accounts.routes.js";
 import ledgerRoutes from "./routes/ledger.routes.js";
 import dieselConsumptionRoutes from "./routes/diesel-consumption.routes.js";
 import { initScheduler, sendModuleReport } from "./scheduler.js";
+import { runDatabaseBackup, BACKUP_ROOT, KEEP_DAYS } from "./utils/dbBackup.js";
+import { authenticate, serverHasPermission } from "./middleware/auth.middleware.js";
 import { encryptionMiddleware } from "./middleware/encrypt.middleware.js";
 const IS_PROD = process.env.NODE_ENV === "production";
 if (IS_PROD) {
@@ -114,6 +116,26 @@ connectDB().then(() => { seedFormConfigs(); initScheduler(); });
 initBroadcaster(server);
 app.get("/api/health", (_req, res) => res.json({ status: "ok", ts: Date.now() }));
 
+// Save a PDF blob from frontend and return its public URL
+app.post("/api/reports/save", authenticate, async (req, res) => {
+  try {
+    const chunks = [];
+    req.on("data", chunk => chunks.push(chunk));
+    req.on("end", () => {
+      const buf = Buffer.concat(chunks);
+      const rawName = req.headers["x-filename"] || "report.pdf";
+      const filename = path.basename(rawName).replace(/[^a-zA-Z0-9._\-]/g, "_");
+      const reportsDir = path.join(process.cwd(), "uploads", "reports");
+      if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir, { recursive: true });
+      fs.writeFileSync(path.join(reportsDir, filename), buf);
+      res.json({ success: true, url: `/api/reports/${filename}` });
+    });
+    req.on("error", err => res.status(500).json({ success: false, message: err.message }));
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Public route to serve generated report PDFs via /api path (works behind any reverse proxy)
 app.get("/api/reports/:filename", (req, res) => {
   const filename = path.basename(req.params.filename); // strip any path traversal
@@ -150,6 +172,50 @@ app.use("/api/form-configs", formConfigRoutes);
 app.use("/api/accounts", accountsRoutes);
 app.use("/api/ledger", ledgerRoutes);
 app.use("/api/diesel-consumption", dieselConsumptionRoutes);
+// Manual backup trigger — Super Admin only
+app.post("/api/admin/backup", authenticate, async (req, res) => {
+  try {
+    const roleLower = (req.user?.role || "").toLowerCase();
+    if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
+      return res.status(403).json({ success: false, message: "Super Admin only" });
+    }
+    logger.info(`[Backup] Manual backup triggered by ${req.user.name}`);
+    const result = await runDatabaseBackup();
+    res.json({ success: true, message: "Backup complete", data: result });
+  } catch (err) {
+    logger.error("[Backup] Manual backup failed:", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Backup status — list available backups
+app.get("/api/admin/backup", authenticate, async (req, res) => {
+  try {
+    const roleLower = (req.user?.role || "").toLowerCase();
+    if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
+      return res.status(403).json({ success: false, message: "Super Admin only" });
+    }
+    const fs = await import("fs");
+    const path = await import("path");
+    if (!fs.default.existsSync(BACKUP_ROOT)) {
+      return res.json({ success: true, data: { backups: [], backupDir: BACKUP_ROOT, keepDays: KEEP_DAYS } });
+    }
+    const folders = fs.default.readdirSync(BACKUP_ROOT, { withFileTypes: true })
+      .filter(e => e.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(e.name))
+      .sort((a, b) => b.name.localeCompare(a.name))
+      .map(e => {
+        const manifestPath = path.default.join(BACKUP_ROOT, e.name, "manifest.json");
+        const manifest = fs.default.existsSync(manifestPath)
+          ? JSON.parse(fs.default.readFileSync(manifestPath, "utf8"))
+          : null;
+        return { date: e.name, manifest };
+      });
+    res.json({ success: true, data: { backups: folders, backupDir: BACKUP_ROOT, keepDays: KEEP_DAYS } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.post("/api/webhook/trigger-mr-report", async (req, res) => {
   try {
     const secret = req.headers["x-webhook-secret"];

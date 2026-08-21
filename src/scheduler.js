@@ -4,6 +4,7 @@ import {
   Quotation, Supplier, Catalogue, AuditLog, MaterialPlan, AccountEntry, Settings,
 } from "./models/index.js";
 import { logger } from "./utils/logger.js";
+import { runDatabaseBackup, BACKUP_ROOT } from "./utils/dbBackup.js";
 import { generateMRReportPDF } from "./utils/mrPdfGenerator.js";
 import { generateTableReport } from "./utils/reportPdfGenerator.js";
 import cloudinary from "./config/cloudinary.js";
@@ -457,4 +458,17 @@ export function initScheduler() {
     }
   });
   logger.info("[Scheduler] Report automation scheduler initialized");
+
+  // ── Daily DB backup — runs at 2:00 AM IST (20:30 UTC) ────────────────────────
+  const backupTime = process.env.BACKUP_CRON || "30 20 * * *"; // UTC → 2 AM IST
+  cron.schedule(backupTime, async () => {
+    logger.info("[Backup] Starting scheduled daily database backup...");
+    try {
+      const result = await runDatabaseBackup();
+      logger.info(`[Backup] Daily backup complete — ${result.totalCollections} collections, ${result.totalDocs} docs, ${result.totalSizeKB} KB → ${BACKUP_ROOT}/${result.date}`);
+    } catch (err) {
+      logger.error("[Backup] Daily backup FAILED:", err.message);
+    }
+  }, { timezone: "UTC" });
+  logger.info(`[Backup] Daily backup scheduled at ${backupTime} UTC (2:00 AM IST) → ${BACKUP_ROOT}`);
 }
