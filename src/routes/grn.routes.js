@@ -1307,9 +1307,9 @@ router.put("/:id/receipt/:idx/bill-verify", authenticate, async (req, res) => {
     const receipt = grn.receipts?.[idx];
     if (!receipt) return res.status(404).json({ success: false, message: "Receipt batch not found" });
     if (receipt.paymentStatus === "paid") return res.status(400).json({ success: false, message: "This shipment is locked — already paid" });
-    const { remark, invoiceNo, invoiceAmount } = req.body;
+    const { remark, invoiceNo, invoiceAmount, freightAmount, loadingAmount, unloadingAmount } = req.body;
     if (!invoiceAmount || Number(invoiceAmount) <= 0) return res.status(400).json({ success: false, message: "Invoice amount is required and must be greater than 0" });
-    // Validate invoiceAmount does not exceed computed receipt shipment value
+    // Validate invoiceAmount does not exceed computed receipt shipment value + extra charges
     if (grn.poId) {
       const po = await PurchaseOrder.findOne({ id: grn.poId });
       if (po) {
@@ -1333,8 +1333,12 @@ router.put("/:id/receipt/:idx/bill-verify", authenticate, async (req, res) => {
           const total = gstType === "Exclusive" ? base * (1 + gstPct / 100) : base;
           return sum + total;
         }, 0);
-        if (receiptValue > 0 && Number(invoiceAmount) > receiptValue + 0.5 && !receipt.reVerifyApprovedBy) {
-          return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${receiptValue.toLocaleString("en-IN")}` });
+        const freight   = Number(freightAmount)   || 0;
+        const loading   = Number(loadingAmount)   || 0;
+        const unloading = Number(unloadingAmount) || 0;
+        const extraCharges = freight + loading + unloading;
+        if (receiptValue > 0 && Number(invoiceAmount) > receiptValue + extraCharges + 0.5 && !receipt.reVerifyApprovedBy) {
+          return res.status(400).json({ success: false, message: `Invoice amount ₹${Number(invoiceAmount).toLocaleString("en-IN")} exceeds shipment value ₹${(receiptValue + extraCharges).toLocaleString("en-IN")}` });
         }
       }
     }
@@ -1345,8 +1349,11 @@ router.put("/:id/receipt/:idx/bill-verify", authenticate, async (req, res) => {
     grn.receipts[idx].invoiceAmount = Number(invoiceAmount);
     grn.receipts[idx].reVerifyApprovedBy = null;
     grn.receipts[idx].reVerifyApprovedAt = null;
-    if (remark)    grn.receipts[idx].verifyRemark = remark;
-    if (invoiceNo) grn.receipts[idx].invoiceNo    = invoiceNo;
+    if (remark)         grn.receipts[idx].verifyRemark  = remark;
+    if (invoiceNo)      grn.receipts[idx].invoiceNo     = invoiceNo;
+    if (freightAmount   !== undefined) grn.receipts[idx].freightAmount   = Number(freightAmount)   || 0;
+    if (loadingAmount   !== undefined) grn.receipts[idx].loadingAmount   = Number(loadingAmount)   || 0;
+    if (unloadingAmount !== undefined) grn.receipts[idx].unloadingAmount = Number(unloadingAmount) || 0;
     grn.markModified("receipts");
     await grn.save();
     logAudit(req.user, "UPDATE", "GRN", grn.id, { action: "receipt_bill_verified", receiptIdx: idx });
