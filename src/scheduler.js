@@ -377,16 +377,32 @@ export async function sendModuleReport(moduleKey, dataRange = "today", slackIds 
     pdfBuffer = await generateTableReport(cfg.label, cfg.columns, rows, rangeLabel, cfg.slackTitle);
   }
 
-  const pdfUrl = await savePDFAndGetUrl(pdfBuffer, pdfFilename);
-
   const generatedAt = new Date().toLocaleString("en-IN", {
     timeZone: "Asia/Kolkata", day: "2-digit", month: "short",
     year: "numeric", hour: "2-digit", minute: "2-digit", hour12: true,
   });
 
+  // Only upload to Cloudinary when n8n will actually use the URL
+  const willUseN8n = !!n8nUrl && !(botToken && slackIds.length > 0);
+  const pdfUrl = willUseN8n ? await savePDFAndGetUrl(pdfBuffer, pdfFilename) : null;
+
   // ── Direct Slack upload ──────────────────────────────────────────────────────
+  const COUNT_LABELS = {
+    MR: "MRs", PO: "POs", GRN: "GRNs", Inventory: "Items",
+    Inward: "Transactions", Quotation: "Quotations", "PO-Report": "POs",
+    Accounts: "Entries", MaterialPlan: "Plans", Suppliers: "Suppliers",
+    Catalogue: "Items", AuditLog: "Logs",
+  };
+  const countLabel = COUNT_LABELS[moduleKey] || "Records";
+
   if (botToken && slackIds.length > 0) {
-    const message = `📋 *${cfg.slackTitle} — ${rangeLabel}*\n*Total Records:* ${recordCount}  •  _Generated at ${generatedAt}_`;
+    const message = [
+      `📊 *${cfg.label.toUpperCase()} – Daily Summary*`,
+      `📅 *Date:* ${rangeLabel}`,
+      `📦 *Module:* ${moduleKey}`,
+      `👥 *Total ${countLabel}:* ${recordCount}`,
+      `🕐 _Generated at ${generatedAt}_`,
+    ].join("\n");
     for (const channelId of slackIds) {
       try {
         await uploadPDFToSlack(botToken, channelId, pdfBuffer, pdfFilename, message);
@@ -399,8 +415,9 @@ export async function sendModuleReport(moduleKey, dataRange = "today", slackIds 
     logger.warn(`[Scheduler] SLACK_BOT_TOKEN set but no slackIds configured for ${moduleKey} automation`);
   }
 
-  // ── n8n webhook ──────────────────────────────────────────────────────────────
-  if (n8nUrl) {
+  // ── n8n webhook — skip if direct Slack upload already handled delivery ───────
+  const slackHandledDirectly = botToken && slackIds.length > 0;
+  if (n8nUrl && !slackHandledDirectly) {
     const payload = {
       type: `${moduleKey}_REPORT`, module: moduleKey, dataRange, rangeLabel,
       totalCount: recordCount, slackIds, slackChannel: slackIds[0] || "",
