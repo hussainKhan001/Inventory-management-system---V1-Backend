@@ -111,6 +111,17 @@ router.post("/", authenticate, async (req, res) => {
       return res.status(403).json({ success: false, message: "Forbidden" });
     }
     const rawGrnData = req.body;
+    // Block GRN creation if the linked PO has not been fully approved yet
+    if (rawGrnData.poId) {
+      const linkedPO = await PurchaseOrder.findOne({ id: rawGrnData.poId }, { status: 1, id: 1 }).lean();
+      const unapprovedStatuses = ["Pending L1", "Pending L2", "Pending L3", "On Hold", "Rejected", "Blocked", "Cancelled"];
+      if (linkedPO && unapprovedStatuses.includes(linkedPO.status)) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot create GRN. PO ${linkedPO.id} is currently "${linkedPO.status}" — all approvals (L1, L2, L3) must be completed before receiving goods.`,
+        });
+      }
+    }
     // H11: Block duplicate GRN only when an existing one is fully Confirmed.
     // Partial GRNs allow a follow-up GRN for the remaining items.
     if (rawGrnData.poId) {

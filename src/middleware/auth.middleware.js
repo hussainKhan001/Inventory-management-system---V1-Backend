@@ -38,9 +38,12 @@ async function serverHasPermission(user, permission) {
   const roleLower = (user.role || "").toLowerCase().trim();
   if (roleLower === "super admin" || roleLower === "superadmin" || roleLower === "admin") return true;
   if (permission.startsWith("VIEW_")) return true;
-  const rolePerm = await RolePermission.findOne({ role: { $regex: new RegExp(`^${user.role}$`, "i") } });
+  // Escape special regex chars so role names like "L1 (AGM)" don't break the pattern
+  const escapedRole = (user.role || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rolePerm = await RolePermission.findOne({ role: { $regex: new RegExp(`^${escapedRole}$`, "i") } });
   if (rolePerm?.permissions.includes(permission)) return true;
   if (user.permissions?.includes(permission)) return true;
+  if (Array.isArray(user.rolePermissions) && user.rolePermissions.includes(permission)) return true;
   return false;
 }
 __name(serverHasPermission, "serverHasPermission");

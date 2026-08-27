@@ -275,6 +275,9 @@ router.delete("/inward/:id", authenticate, async (req, res) => {
 });
 router.post("/outward", authenticate, async (req, res) => {
   try {
+    if (!await serverHasPermission(req.user, "CREATE_OUTWARD")) {
+      return res.status(403).json({ success: false, message: "You do not have permission to issue materials (CREATE_OUTWARD required)." });
+    }
     const body = req.body;
     if (!body.items || !Array.isArray(body.items)) throw new Error("Items array required");
     const outSkus = body.items.map(i => i.sku);
@@ -421,6 +424,9 @@ router.post("/outward", authenticate, async (req, res) => {
 });
 router.put("/outward/:id", authenticate, async (req, res) => {
   try {
+    if (!await serverHasPermission(req.user, "EDIT_OUTWARD")) {
+      return res.status(403).json({ success: false, message: "You do not have permission to edit outward transactions (EDIT_OUTWARD required)." });
+    }
     const oldItem = await Outward.findOne({ id: req.params.id });
     if (!oldItem) throw new Error("Item not found");
     const data = req.body;
@@ -603,6 +609,9 @@ router.put("/outward/:id", authenticate, async (req, res) => {
 });
 router.delete("/outward/:id", authenticate, async (req, res) => {
   try {
+    if (!await serverHasPermission(req.user, "DELETE_OUTWARD")) {
+      return res.status(403).json({ success: false, message: "You do not have permission to delete outward transactions (DELETE_OUTWARD required)." });
+    }
     const item = await Outward.findOne({ id: req.params.id });
     if (item) {
       const effectiveMrId = item.mrId || item.mrNo;
