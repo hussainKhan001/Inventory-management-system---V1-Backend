@@ -16,7 +16,8 @@ const QuotationItemSchema = new Schema({
 
 const QuotationSchema = new Schema({
   id:           { type: String, required: true, unique: true },
-  mrId:         { type: String, required: true },
+  mrId:         String,
+  planId:       String,
   category:     String,
   supplierId:   String,
   supplierName: { type: String, required: true },
@@ -39,7 +40,8 @@ const QuotationSchema = new Schema({
   unloadingGstPct:   Number,
   unloadingGstType:  { type: String, enum: ["Inclusive","Exclusive"] },
   date: { type: String, default: () => new Date().toISOString().split("T")[0] },
-  linkedPoId: String,
+  linkedPoId:       String,
+  linkedMasterPoId: String,
 }, { timestamps: true });
 
 QuotationSchema.pre("save", async function () {
@@ -49,6 +51,8 @@ QuotationSchema.pre("save", async function () {
 });
 
 QuotationSchema.index({ mrId: 1 });
+QuotationSchema.index({ planId: 1 });
+QuotationSchema.index({ linkedMasterPoId: 1 });
 QuotationSchema.index({ supplierName: 1 });
 QuotationSchema.index({ status: 1 });
 QuotationSchema.index({ updatedAt: -1 });

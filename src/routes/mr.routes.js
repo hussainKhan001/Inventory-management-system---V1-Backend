@@ -4,7 +4,7 @@ import { logger } from "../utils/logger.js";
 import { Router } from "express";
 import { generateMRReportPDF } from "../utils/mrPdfGenerator.js";
 import mongoose from "mongoose";
-import { MaterialRequirement, Inventory, MRAllocation, RolePermission, Settings, Quotation } from "../models/index.js";
+import { MaterialRequirement, Inventory, MRAllocation, RolePermission, Settings, Quotation, MaterialPlan } from "../models/index.js";
 import { uploadPDFToSlack } from "../scheduler.js";
 import { authenticate, serverHasPermission } from "../middleware/auth.middleware.js";
 import { getRolesWithPermission, createNotification } from "../utils/notification.js";
@@ -349,11 +349,35 @@ router.post("/", authenticate, async (req, res) => {
     const year = (/* @__PURE__ */ new Date()).getFullYear();
     const seq = await getNextSequence("MR");
     const customId = `MR-${year}-${seq}`;
+
+    // Validate against material plan — flag excess requests for AGM approval
+    let mrStatus = req.body.status || "Store Pending";
+    if (req.body.planId) {
+      const plan = await MaterialPlan.findOne({ id: req.body.planId, status: "Approved" }).lean();
+      if (plan) {
+        const existingMrs = await MaterialRequirement.find({ planId: req.body.planId, status: { $nin: ["Rejected"] } }).lean();
+        const usedMap = {};
+        for (const mr of existingMrs) {
+          for (const it of mr.items || []) {
+            const k = it.sku || it.materialName;
+            if (k) usedMap[k] = (usedMap[k] || 0) + (Number(it.qty) || 0);
+          }
+        }
+        const isExtra = (req.body.items || []).some((it) => {
+          const planItem = plan.items.find((pi) => (pi.sku && pi.sku === it.sku) || (pi.itemName && pi.itemName === it.materialName));
+          if (!planItem) return true;
+          const remaining = Math.max(0, (Number(planItem.required) || 0) - (usedMap[it.sku || it.materialName] || 0));
+          return Number(it.qty) > remaining;
+        });
+        if (isExtra) mrStatus = "Extra Pending AGM";
+      }
+    }
+
     const requirement = await MaterialRequirement.create({
       ...req.body,
       id: customId,
       mrNumber: customId,
-      status: req.body.status || "Store Pending",
+      status: mrStatus,
       date: req.body.date || (/* @__PURE__ */ new Date()).toISOString()
     });
     broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
@@ -456,6 +480,65 @@ router.get("/export", authenticate, async (req, res) => {
   } catch (err) {
     logger.error("Error exporting MR report:", err);
     if (!res.headersSent) res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+const AGM_ROLES = ["AGM", "Head", "Super Admin", "Director", "admin"];
+const GM_ROLES_MR = ["Director", "GM", "Super Admin", "admin"];
+
+// AGM approves extra requirement → escalates to GM
+router.post("/:id/extra-approve-agm", authenticate, async (req, res) => {
+  try {
+    const canApprove = AGM_ROLES.includes(req.user.role) || await serverHasPermission(req.user, "APPROVE_EXTRA_MR");
+    if (!canApprove) return res.status(403).json({ success: false, message: "Forbidden" });
+    const mr = await MaterialRequirement.findOne({ id: req.params.id });
+    if (!mr) return res.status(404).json({ success: false, message: "MR not found" });
+    if (mr.status !== "Extra Pending AGM") return res.status(400).json({ success: false, message: "MR is not pending AGM approval" });
+    mr.status = "Extra Pending GM";
+    mr.extraApprovals = [...(mr.extraApprovals || []), { by: req.user.name, role: "AGM", at: new Date(), action: "Approved", remark: req.body.remark || "" }];
+    await mr.save();
+    broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
+    const gmRoles = await getRolesWithPermission("APPROVE_MATERIAL_PLAN");
+    await createNotification({ message: `Extra MR ${mr.id} approved by AGM — pending GM approval`, severity: "warning", path: "material-requirements", senderId: req.user._id, targetRoles: gmRoles.length ? gmRoles : ["Director", "Super Admin"] });
+    res.json({ success: true, data: mr });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// GM approves extra requirement → enters normal MR flow
+router.post("/:id/extra-approve-gm", authenticate, async (req, res) => {
+  try {
+    const canApprove = GM_ROLES_MR.includes(req.user.role) || await serverHasPermission(req.user, "APPROVE_MATERIAL_PLAN");
+    if (!canApprove) return res.status(403).json({ success: false, message: "Forbidden" });
+    const mr = await MaterialRequirement.findOne({ id: req.params.id });
+    if (!mr) return res.status(404).json({ success: false, message: "MR not found" });
+    if (!["Extra Pending AGM", "Extra Pending GM"].includes(mr.status)) return res.status(400).json({ success: false, message: "MR is not pending extra approval" });
+    mr.status = "Store Pending";
+    mr.extraApprovals = [...(mr.extraApprovals || []), { by: req.user.name, role: "GM", at: new Date(), action: "Approved", remark: req.body.remark || "" }];
+    await mr.save();
+    broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
+    const storeRoles = await getRolesWithPermission("APPROVE_MR_STORE");
+    await createNotification({ message: `Extra MR ${mr.id} fully approved by GM — store processing required`, severity: "success", path: "material-requirements", senderId: req.user._id, targetRoles: storeRoles });
+    res.json({ success: true, data: mr });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// AGM or GM rejects extra requirement
+router.post("/:id/extra-reject", authenticate, async (req, res) => {
+  try {
+    const mr = await MaterialRequirement.findOne({ id: req.params.id });
+    if (!mr) return res.status(404).json({ success: false, message: "MR not found" });
+    if (!["Extra Pending AGM", "Extra Pending GM"].includes(mr.status)) return res.status(400).json({ success: false, message: "MR is not pending extra approval" });
+    mr.status = "Rejected";
+    mr.extraApprovals = [...(mr.extraApprovals || []), { by: req.user.name, role: req.user.role, at: new Date(), action: "Rejected", remark: req.body.reason || "" }];
+    await mr.save();
+    broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
+    res.json({ success: true, data: mr });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
