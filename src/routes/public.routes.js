@@ -14,7 +14,8 @@ import {
   PurchaseOrder,
   GRN,
   InwardReturn,
-  OutwardReturn
+  OutwardReturn,
+  MaterialPlan
 } from "../models/index.js";
 import { getNextSequence } from "../utils/sequence.js";
 import { broadcast } from "../utils/broadcaster.js";
@@ -241,6 +242,17 @@ router.get("/mr/:id", async (req, res) => {
       return res.status(404).json({ success: false, message: "Material Requirement not found" });
     }
     res.json({ success: true, data: mr });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+router.get("/plan/:id", async (req, res) => {
+  try {
+    const plan = await MaterialPlan.findOne({ id: req.params.id }, { id: 1, project: 1, milestone: 1, location: 1, items: 1, status: 1, date: 1 }).lean();
+    if (!plan) {
+      return res.status(404).json({ success: false, message: "Material Plan not found" });
+    }
+    res.json({ success: true, data: plan });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
