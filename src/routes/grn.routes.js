@@ -1282,7 +1282,9 @@ router.put("/:id/receipt/:idx/bill-reject", authenticate, async (req, res) => {
 router.put("/:id/bill-verify-revert", authenticate, async (req, res) => {
   try {
     const requiredPerm = req.body?.approveReVerify ? "APPROVE_REVERIFY" : "VERIFY_BILL";
-    if (!await serverHasPermission(req.user, requiredPerm)) {
+    const hasReqPerm = await serverHasPermission(req.user, requiredPerm) ||
+      (!req.body?.approveReVerify && await serverHasPermission(req.user, "APPROVE_PAYMENT_AGM"));
+    if (!hasReqPerm) {
       return res.status(403).json({ success: false, message: "Unauthorized" });
     }
     const grn = await GRN.findOne({ id: req.params.id });
@@ -1292,6 +1294,15 @@ router.put("/:id/bill-verify-revert", authenticate, async (req, res) => {
     grn.verifiedBy = null; grn.verifiedAt = null; grn.verifyRemark = null;
     grn.approvedBy = null; grn.approvedAt = null;
     grn.invoiceAmount = null; grn.invoiceNo = null;
+    if (req.body?.remark) {
+      grn.rejectReason = req.body.remark;
+      grn.rejectedBy = req.user.name;
+      grn.rejectedAt = new Date().toISOString();
+    } else if (!req.body?.approveReVerify) {
+      grn.rejectReason = null;
+      grn.rejectedBy = null;
+      grn.rejectedAt = null;
+    }
     if (req.body?.approveReVerify) {
       grn.reVerifyApprovedBy = req.user.name;
       grn.reVerifyApprovedAt = new Date().toISOString();
@@ -1485,7 +1496,9 @@ router.delete("/:id/receipt/:idx/payment", authenticate, async (req, res) => {
 router.put("/:id/receipt/:idx/bill-verify-revert", authenticate, async (req, res) => {
   try {
     const requiredPerm = req.body?.approveReVerify ? "APPROVE_REVERIFY" : "VERIFY_BILL";
-    if (!await serverHasPermission(req.user, requiredPerm)) {
+    const hasReqPerm = await serverHasPermission(req.user, requiredPerm) ||
+      (!req.body?.approveReVerify && await serverHasPermission(req.user, "APPROVE_PAYMENT_AGM"));
+    if (!hasReqPerm) {
       return res.status(403).json({ success: false, message: "Unauthorized" });
     }
     const grn = await GRN.findOne({ id: req.params.id });
@@ -1502,6 +1515,15 @@ router.put("/:id/receipt/:idx/bill-verify-revert", authenticate, async (req, res
     grn.receipts[idx].approvedAt    = null;
     grn.receipts[idx].invoiceAmount = null;
     grn.receipts[idx].invoiceNo     = null;
+    if (req.body?.remark) {
+      grn.receipts[idx].rejectReason = req.body.remark;
+      grn.receipts[idx].rejectedBy   = req.user.name;
+      grn.receipts[idx].rejectedAt   = new Date().toISOString();
+    } else if (!req.body?.approveReVerify) {
+      grn.receipts[idx].rejectReason = null;
+      grn.receipts[idx].rejectedBy   = null;
+      grn.receipts[idx].rejectedAt   = null;
+    }
     if (req.body?.approveReVerify) {
       grn.receipts[idx].reVerifyApprovedBy = req.user.name;
       grn.receipts[idx].reVerifyApprovedAt = new Date().toISOString();
