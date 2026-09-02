@@ -46,6 +46,7 @@ import ledgerRoutes from "./routes/ledger.routes.js";
 import dieselConsumptionRoutes from "./routes/diesel-consumption.routes.js";
 import masterPoRoutes from "./routes/master-po.routes.js";
 import emrRoutes from "./routes/emr.routes.js";
+import slackRoutes from "./routes/slack.routes.js";
 import { initScheduler, sendModuleReport } from "./scheduler.js";
 import { runDatabaseBackup, BACKUP_ROOT, KEEP_DAYS } from "./utils/dbBackup.js";
 import { authenticate, serverHasPermission } from "./middleware/auth.middleware.js";
@@ -176,6 +177,7 @@ app.use("/api/ledger", ledgerRoutes);
 app.use("/api/diesel-consumption", dieselConsumptionRoutes);
 app.use("/api/master-pos", masterPoRoutes);
 app.use("/api/emr", emrRoutes);
+app.use("/api/slack", slackRoutes);
 // Manual backup trigger — Super Admin only
 app.post("/api/admin/backup", authenticate, async (req, res) => {
   try {

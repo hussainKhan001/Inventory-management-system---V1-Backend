@@ -56,15 +56,9 @@ class POService {
     };
   }
 
-  // Fire post-approval notifications and n8n webhook after a PO status change.
+  // Fire post-approval notifications after a PO status change.
   // Pass the already-saved `po` and the `prevStatus` string it held before the save.
   static async fireApprovalSideEffects({ po, prevStatus, changedBy }) {
-    await triggerN8nWebhook("PO_APPROVAL", {
-      poId:           po.id,
-      previousStatus: prevStatus,
-      newStatus:      po.status,
-      changedBy,
-    });
 
     if (po.status === "Approved") {
       const roles = await getRolesWithPermission("VIEW_PURCHASE_ORDERS");

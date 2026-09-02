@@ -18,8 +18,9 @@ function sanitizeFilter(raw) {
 import { getNextSequence } from "./sequence.js";
 import { getRolesWithPermission, createNotification } from "./notification.js";
 import { triggerN8nWebhook } from "./webhook.js";
+import { sendSlackApprovalMessage } from "./slack-po.js";
 import { broadcast } from "./broadcaster.js";
-import { PurchaseOrder, MaterialRequirement, Quotation, MRAllocation, Transaction, Settings, GRN } from "../models/index.js";
+import { PurchaseOrder, MaterialRequirement, Quotation, MRAllocation, Transaction, Settings, GRN, Supplier } from "../models/index.js";
 import { POService } from "../services/po.service.js";
 import { logAudit, buildDiff } from "./audit.js";
 const cascadeDeleteMR = /* @__PURE__ */ __name(async (mrId) => {
@@ -218,6 +219,29 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
           senderId: req.user._id,
           targetRoles: roles
         });
+        // Send Slack approval card for L1
+        Promise.all([
+          Settings.findOne({}, { approvers: 1, companyApprovers: 1 }).lean(),
+          Supplier.findOne({ id: item.supplier }, { companyName: 1, supplierName: 1 }).lean(),
+        ]).then(([cfg, supplierDoc]) => {
+          const companyApv = (cfg?.companyApprovers || []).find(ca => ca.companyName === item.companyName);
+          const apv = companyApv || cfg?.approvers || {};
+          const channelId = (companyApv?.l1SlackChannelId) || cfg?.approvers?.l1SlackChannelId || "";
+          const dmUserId = (companyApv?.l1SlackId) || cfg?.approvers?.l1SlackId || "";
+          const supplierName = supplierDoc?.companyName || supplierDoc?.supplierName || item.supplier || "";
+          sendSlackApprovalMessage({
+            level:       1,
+            poId:        item.id,
+            supplier:    supplierName,
+            companyName: item.companyName || "",
+            totalValue:  item.totalValue  || 0,
+            project:     item.project     || "",
+            approvedBy:  req.user?.name   || "",
+            approverName: apv.l1 || "",
+            channelId,
+            dmUserId,
+          });
+        }).catch(err => console.error("[Slack] L1 create lookup failed:", err.message));
       }
       if (webhookEventPrefix) {
         if (webhookEventPrefix === "PURCHASE_ORDER") {
@@ -408,6 +432,7 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
       // (arrays/objects) that Mongoose won't track automatically
       Object.keys(data).forEach(key => oldItem.markModified(key));
       const item = await oldItem.save();
+      if (resourceName === "pos") console.log(`[DEBUG] PO save: oldStatus=${oldStatus} newStatus=${item.status} changed=${oldStatus !== item.status}`);
       // When PO items change, recalculate status of all linked GRNs so removed items don't keep them "Partial"
       if (resourceName === "pos" && data.items) {
         const updatedPoItems = item.items || [];
@@ -454,14 +479,9 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
           senderId: req.user._id
         });
         if (resourceName === "pos") {
-          await triggerN8nWebhook("PO_APPROVAL", {
-            poId: item[idField] || item.id,
-            previousStatus: oldItem.status,
-            newStatus: item.status,
-            changedBy: req.user.name
-          });
           let nextPermission = "";
-          if (item.status === "Pending L2") nextPermission = "APPROVE_PURCHASE_ORDER_L2";
+          if (item.status === "Pending L1") nextPermission = "APPROVE_PURCHASE_ORDER_L1";
+          else if (item.status === "Pending L2") nextPermission = "APPROVE_PURCHASE_ORDER_L2";
           else if (item.status === "Pending L3") nextPermission = "APPROVE_PURCHASE_ORDER_L3";
           else if (item.status === "Approved") {
             const procurementRoles = await getRolesWithPermission("VIEW_PURCHASE_ORDERS");
@@ -517,24 +537,33 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
               targetRoles: roles
             });
           }
-          // Fire dedicated L3 webhook so n8n can send a Slack approval message.
-          // triggerN8nWebhook is already try/caught internally — a down n8n instance
-          // will only log a warning and never block or fail the approval response.
-          if (item.status === "Pending L3") {
-            await triggerN8nWebhook("PO_APPROVAL_L3", {
-              poId:        item.id,
-              supplier:    item.supplier      || "",
-              project:     item.project       || "",
-              companyName: item.companyName   || "",
-              totalValue:  item.totalValue    || 0,
-              priority:    item.priority      || "Normal",
-              createdBy:   item.createdBy     || "",
-              date:        item.date          || "",
-              mrId:        item.mrId          || "",
-              remark:      item.remark        || "",
-              approvedByL2: req.user?.name    || "",
-              previousStatus: oldItem.status,
-            });
+          // Send Slack approval card for each pending level — channel comes from Settings dynamically.
+          const pendingLevel = item.status === "Pending L1" ? 1 : item.status === "Pending L2" ? 2 : item.status === "Pending L3" ? 3 : 0;
+          if (pendingLevel > 0) {
+            Promise.all([
+              Settings.findOne({}, { approvers: 1, companyApprovers: 1 }).lean(),
+              Supplier.findOne({ id: item.supplier }, { companyName: 1, supplierName: 1 }).lean(),
+            ]).then(([cfg, supplierDoc]) => {
+              const companyApv = (cfg?.companyApprovers || []).find(ca => ca.companyName === item.companyName);
+              const apv = companyApv || cfg?.approvers || {};
+              const channelKey = `l${pendingLevel}SlackChannelId`;
+              const channelId = (companyApv?.[channelKey]) || cfg?.approvers?.[channelKey] || "";
+              const dmKey = `l${pendingLevel}SlackId`;
+              const dmUserId = (companyApv?.[dmKey]) || cfg?.approvers?.[dmKey] || "";
+              const supplierName = supplierDoc?.companyName || supplierDoc?.supplierName || item.supplier || "";
+              sendSlackApprovalMessage({
+                level:       pendingLevel,
+                poId:        item.id,
+                supplier:    supplierName,
+                companyName: item.companyName || "",
+                totalValue:  item.totalValue  || 0,
+                project:     item.project     || "",
+                approvedBy:  req.user?.name   || "",
+                approverName: apv[`l${pendingLevel}`] || "",
+                channelId,
+                dmUserId,
+              });
+            }).catch(err => console.error("[Slack] Settings/Supplier lookup failed:", err.message));
           }
         }
         if (resourceName === "material-requirements") {
