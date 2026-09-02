@@ -106,6 +106,7 @@ router.post("/", authenticate, async (req, res) => {
   let createdGrnId = null;
   let savedItems = [];
   let savedStore = null;
+  let _newPoStatus = null;
   try {
     if (!await serverHasPermission(req.user, "CREATE_GRN")) {
       return res.status(403).json({ success: false, message: "Forbidden" });
@@ -302,20 +303,23 @@ router.post("/", authenticate, async (req, res) => {
       if (po) {
         const allGrns = await GRN.find({ poId: grnData.poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
         let allFulfilled = true;
-        let anyVariance = false;
+        let anyOverReceived = false;
+        let anyReceived1 = false;
         for (const poItem of po.items) {
           const totalReceived = allGrns.reduce((sum, g) => {
             const grnItem = g.items.find((i) => i.sku === poItem.sku);
             return sum + (grnItem?.received || 0);
           }, 0);
+          if (totalReceived > 0) anyReceived1 = true;
           if (totalReceived < (poItem.qty || 0)) {
             allFulfilled = false;
-            if (totalReceived > 0) anyVariance = true;
           } else if (totalReceived > (poItem.qty || 0)) {
-            anyVariance = true;
+            anyOverReceived = true;
           }
         }
-        const newStatus = allFulfilled ? "GRN Fulfilled" : anyVariance ? "GRN Variance" : "GRN Pending";
+        const anyPartialReceived = !allFulfilled && anyReceived1;
+        const newStatus = allFulfilled ? "GRN Fulfilled" : anyOverReceived ? "GRN Variance" : anyPartialReceived ? "GRN Variance" : "GRN Pending";
+        _newPoStatus = newStatus;
         if (po.status !== newStatus) {
           po.status = newStatus;
           await po.save({});
@@ -367,7 +371,7 @@ router.post("/", authenticate, async (req, res) => {
       createdBy: req.user.name
     });
     await checkAndFireLowStockWebhook(grnData.items.map((i) => i.sku));
-    res.json({ success: true, data: grn[0] });
+    res.json({ success: true, data: grn[0], newPoStatus: _newPoStatus });
   } catch (error) {
     // C1: Compensate partial writes on failure
     if (createdGrnId) {
@@ -505,20 +509,21 @@ router.put("/:id", authenticate, async (req, res) => {
         const allGrns = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
         const updatedGrnsList = allGrns.map((g) => g.id === req.params.id ? grn : g);
         let allFulfilled = true;
-        let anyVariance = false;
+        let anyOverReceived = false;
+        let anyReceived2 = false;
         for (const poItem of po.items) {
           const totalReceived = updatedGrnsList.reduce((sum, g) => {
             const grnItem = g?.items?.find((i) => i.sku === poItem.sku);
             return sum + (grnItem?.received || 0);
           }, 0);
+          if (totalReceived > 0) anyReceived2 = true;
           if (totalReceived < (poItem.qty || 0)) {
             allFulfilled = false;
-            if (totalReceived > 0) anyVariance = true;
           } else if (totalReceived > (poItem.qty || 0)) {
-            anyVariance = true;
+            anyOverReceived = true;
           }
         }
-        const newStatus = allFulfilled ? "GRN Fulfilled" : anyVariance ? "GRN Variance" : "GRN Pending";
+        const newStatus = allFulfilled ? "GRN Fulfilled" : anyOverReceived ? "GRN Variance" : (!allFulfilled && anyReceived2) ? "GRN Variance" : "GRN Pending";
         if (po.status !== newStatus) {
           po.status = newStatus;
           await po.save({});
@@ -546,6 +551,7 @@ router.put("/:id", authenticate, async (req, res) => {
 });
 router.post("/:id/receipt", authenticate, async (req, res) => {
   try {
+    let _receiptNewPoStatus = null;
     const grn = await GRN.findOne({ id: req.params.id });
     if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
     const receipt = {
@@ -609,31 +615,33 @@ router.post("/:id/receipt", authenticate, async (req, res) => {
       if (po) {
         const allGrns = await GRN.find({ poId: grn.poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
         let allFulfilled = true;
-        let anyVariance = false;
+        let anyOverReceived = false;
+        let anyReceived3 = false;
         for (const poItem of po.items) {
           const totalReceived = allGrns.reduce((sum, g) => {
             const grnItem = g.items.find((i) => i.sku === poItem.sku);
             return sum + (grnItem?.received || 0);
           }, 0);
+          if (totalReceived > 0) anyReceived3 = true;
           if (totalReceived < (poItem.qty || 0)) {
             allFulfilled = false;
-            if (totalReceived > 0) anyVariance = true;
           } else if (totalReceived > (poItem.qty || 0)) {
-            anyVariance = true;
+            anyOverReceived = true;
           }
         }
-        const newPoStatus = allFulfilled ? "GRN Fulfilled" : anyVariance ? "GRN Variance" : "GRN Pending";
+        const newPoStatus = allFulfilled ? "GRN Fulfilled" : anyOverReceived ? "GRN Variance" : (!allFulfilled && anyReceived3) ? "GRN Variance" : "GRN Pending";
         if (po.status !== newPoStatus) {
           po.status = newPoStatus;
           await po.save();
           broadcast({ type: "DATA_UPDATED", path: "pos" });
         }
+        _receiptNewPoStatus = newPoStatus;
       }
     }
     logAudit(req.user, "ADD_RECEIPT", "GRN", grn.id, { challan: receipt.challan, items: receipt.items.length });
     broadcast({ type: "DATA_UPDATED", path: "grn" });
     broadcast({ type: "DATA_UPDATED", path: "inventory" });
-    res.json({ success: true, data: grn });
+    res.json({ success: true, data: grn, newPoStatus: _receiptNewPoStatus });
   } catch (error) {
     logger.error("Error adding GRN receipt:", error);
     res.status(400).json({ success: false, message: error.message });
@@ -641,6 +649,7 @@ router.post("/:id/receipt", authenticate, async (req, res) => {
 });
 router.put("/:id/receipt/:idx", authenticate, async (req, res) => {
   try {
+    let _editReceiptNewPoStatus = null;
     const idx = parseInt(req.params.idx);
     const grn = await GRN.findOne({ id: req.params.id });
     if (!grn) return res.status(404).json({ success: false, message: "GRN not found" });
@@ -715,20 +724,22 @@ router.put("/:id/receipt/:idx", authenticate, async (req, res) => {
         if (po) {
           const allGrns = await GRN.find({ poId: grn.poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
           let allFulfilled = true;
-          let anyVariance = false;
+          let anyOverReceived = false;
+          let anyReceived4 = false;
           for (const poItem of po.items) {
             const totalReceived = allGrns.reduce((sum, g) => {
               const grnItem = g.items.find((i) => i.sku === poItem.sku);
               return sum + (grnItem?.received || 0);
             }, 0);
+            if (totalReceived > 0) anyReceived4 = true;
             if (totalReceived < (poItem.qty || 0)) {
               allFulfilled = false;
-              if (totalReceived > 0) anyVariance = true;
             } else if (totalReceived > (poItem.qty || 0)) {
-              anyVariance = true;
+              anyOverReceived = true;
             }
           }
-          const newPoStatus = allFulfilled ? "GRN Fulfilled" : anyVariance ? "GRN Variance" : "GRN Pending";
+          const newPoStatus = allFulfilled ? "GRN Fulfilled" : anyOverReceived ? "GRN Variance" : (!allFulfilled && anyReceived4) ? "GRN Variance" : "GRN Pending";
+          _editReceiptNewPoStatus = newPoStatus;
           if (po.status !== newPoStatus) {
             po.status = newPoStatus;
             await po.save();
@@ -743,7 +754,7 @@ router.put("/:id/receipt/:idx", authenticate, async (req, res) => {
     await grn.save();
     logAudit(req.user, "EDIT_RECEIPT", "GRN", grn.id, { receiptIdx: idx, challan: grn.receipts[idx].challan, itemsEdited: !!newItems });
     broadcast({ type: "DATA_UPDATED", path: "grn" });
-    res.json({ success: true, data: grn });
+    res.json({ success: true, data: grn, newPoStatus: _editReceiptNewPoStatus });
   } catch (error) {
     logger.error("Error editing GRN receipt:", error);
     res.status(400).json({ success: false, message: error.message });

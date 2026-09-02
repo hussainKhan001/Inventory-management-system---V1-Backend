@@ -62,6 +62,10 @@ const EVENT_URL_MAP = {
   NEW_PO:                 "N8N_WEBHOOK_NEW_PO",
   GRN:                    "N8N_WEBHOOK_GRN",
   LOW_STOCK:              "N8N_WEBHOOK_LOW_STOCK",
+  // Webhook 1: generic PO status-change notification → N8N_WEBHOOK_GENERIC (fallback)
+  // PO_APPROVAL intentionally NOT listed here so it falls back to N8N_WEBHOOK_GENERIC
+  // Webhook 2: dedicated L3 approval card → own URL, never falls back to generic
+  PO_APPROVAL_L3:         "N8N_L3_APPROVAL_WEBHOOK_URL",
 };
 
 async function triggerN8nWebhook(event, payload) {

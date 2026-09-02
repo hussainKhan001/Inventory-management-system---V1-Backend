@@ -47,7 +47,22 @@ async function serverHasPermission(user, permission) {
   return false;
 }
 __name(serverHasPermission, "serverHasPermission");
+// Machine-to-machine auth for internal/n8n calls — no user session required.
+// Set INTERNAL_API_KEY in .env and pass it as the x-api-key request header.
+const authenticateInternal = /* @__PURE__ */ __name((req, res, next) => {
+  const key = req.headers["x-api-key"];
+  const expected = process.env.INTERNAL_API_KEY;
+  if (!expected) {
+    return res.status(503).json({ success: false, message: "Internal API key not configured on server" });
+  }
+  if (!key || key !== expected) {
+    return res.status(401).json({ success: false, message: "Invalid or missing x-api-key" });
+  }
+  next();
+}, "authenticateInternal");
+
 export {
   authenticate,
+  authenticateInternal,
   serverHasPermission
 };

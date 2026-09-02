@@ -446,7 +446,7 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
         ? { from: oldStatus, to: item.status, changedFields }
         : { changedFields };
       logAudit(req.user, auditAction, resourceName, item[idField] || item.id, auditDetails, { changes });
-      if (oldItem && item && oldItem.status !== item.status) {
+      if (oldItem && item && oldStatus !== item.status) {
         await createNotification({
           message: `${resourceName.toUpperCase()} ${item[idField] || item.id} status changed to ${item.status} by ${req.user.name}`,
           severity: item.status === "Approved" || item.status === "Fulfilled" ? "success" : "info",
@@ -515,6 +515,25 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
               path: "pos",
               senderId: req.user._id,
               targetRoles: roles
+            });
+          }
+          // Fire dedicated L3 webhook so n8n can send a Slack approval message.
+          // triggerN8nWebhook is already try/caught internally — a down n8n instance
+          // will only log a warning and never block or fail the approval response.
+          if (item.status === "Pending L3") {
+            await triggerN8nWebhook("PO_APPROVAL_L3", {
+              poId:        item.id,
+              supplier:    item.supplier      || "",
+              project:     item.project       || "",
+              companyName: item.companyName   || "",
+              totalValue:  item.totalValue    || 0,
+              priority:    item.priority      || "Normal",
+              createdBy:   item.createdBy     || "",
+              date:        item.date          || "",
+              mrId:        item.mrId          || "",
+              remark:      item.remark        || "",
+              approvedByL2: req.user?.name    || "",
+              previousStatus: oldItem.status,
             });
           }
         }

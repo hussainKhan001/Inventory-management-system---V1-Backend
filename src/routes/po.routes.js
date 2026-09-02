@@ -7,7 +7,8 @@ import fs from "fs";
 import multer from "multer";
 import { PurchaseOrder, Quotation, MaterialRequirement, Supplier, Settings } from "../models/index.js";
 import { GRN } from "../models/grn.model.js";
-import { authenticate, serverHasPermission } from "../middleware/auth.middleware.js";
+import { authenticate, authenticateInternal, serverHasPermission } from "../middleware/auth.middleware.js";
+import { POService } from "../services/po.service.js";
 import { getRolesWithPermission, createNotification } from "../utils/notification.js";
 import { triggerN8nWebhook, sendSlackFile } from "../utils/webhook.js";
 import cloudinary from "../config/cloudinary.js";
@@ -480,6 +481,79 @@ router.post("/:id/reject-revision", authenticate, async (req, res) => {
   }
 });
 
+// External L3 approval endpoint — called by n8n (Slack button) with x-api-key header.
+// PATCH /pos/:id/l3-approval
+// Body: { action, approverName, approverSlackId?, remark?, redirectTo? }
+router.patch("/:id/l3-approval", authenticateInternal, async (req, res) => {
+  try {
+    const { action, approverName, approverSlackId, remark, redirectTo } = req.body;
+
+    const VALID_ACTIONS = ["approve", "reject", "redirect"];
+    if (!VALID_ACTIONS.includes(action)) {
+      return res.status(400).json({ success: false, message: `action must be one of: ${VALID_ACTIONS.join(", ")}` });
+    }
+    if (!approverName || typeof approverName !== "string" || !approverName.trim()) {
+      return res.status(400).json({ success: false, message: "approverName is required" });
+    }
+    if (action === "redirect" && redirectTo && !["L1", "L2"].includes(redirectTo.toUpperCase())) {
+      return res.status(400).json({ success: false, message: "redirectTo must be L1 or L2" });
+    }
+
+    const po = await PurchaseOrder.findOne({ id: req.params.id });
+    if (!po) return res.status(404).json({ success: false, message: "PO not found" });
+    if (po.status !== "Pending L3") {
+      return res.status(409).json({
+        success: false,
+        message: `PO is not awaiting L3 approval (current status: ${po.status})`,
+        status: po.status,
+      });
+    }
+
+    const prevStatus = po.status;
+    const now = new Date().toISOString();
+
+    // Record the decision in approvalHistory
+    if (!po.approvalHistory) po.approvalHistory = [];
+    po.approvalHistory.push({ action, approverName, approverSlackId: approverSlackId || null, remark: remark || null, at: now });
+    po.markModified("approvalHistory");
+
+    if (action === "approve") {
+      po.approvalL3    = "Approved";
+      po.approvalL3At  = now;
+      po.approvalL3By  = approverName.trim();
+      po.status        = "Approved";
+      await POService.freezeApproverSnapshot(po);
+    } else if (action === "reject") {
+      // "Blocked" renders as "Rejected" in the UI (displayLabel mapping)
+      po.status        = "Blocked";
+      po.approvalL3By  = approverName.trim();
+      po.rejectedByName = approverName.trim();
+      po.rejectedAt    = now;
+      if (remark) po.justification = remark;
+    } else {
+      // redirect — default target is L2 unless caller specifies L1
+      const target = (redirectTo || "L2").toUpperCase();
+      po.status     = target === "L1" ? "Pending L1" : "Pending L2";
+      po.approvalL3 = "Pending";
+    }
+
+    await po.save({ validateModifiedOnly: true });
+    await POService.fireApprovalSideEffects({ po, prevStatus, changedBy: approverName.trim() });
+    logAudit(
+      { name: approverName.trim(), _id: approverSlackId || "n8n" },
+      action === "approve" ? "APPROVE_L3" : action === "reject" ? "REJECT_L3" : "REDIRECT_L3",
+      "PurchaseOrder", po.id,
+      { remark, redirectTo }
+    );
+    broadcast({ type: "DATA_UPDATED", path: "pos" });
+
+    res.json({ success: true, status: po.status });
+  } catch (error) {
+    logger.error("l3-approval error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // Migration: link existing POs to their source quotations via linkedPoId on quotation
 router.post("/migrate-quotation-links", authenticate, async (req, res) => {
   try {
@@ -559,6 +633,48 @@ router.post("/migrate-quotation-links", authenticate, async (req, res) => {
     res.json({ success: true, message: `Migration complete. Linked ${linked} PO(s) to quotations.`, linked });
   } catch (error) {
     logger.error("Error in migrate-quotation-links:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Recalculate GRN status for one PO from its active GRNs
+router.post("/:id/sync-grn-status", authenticate, async (req, res) => {
+  try {
+    const po = await PurchaseOrder.findOne({ id: req.params.id });
+    if (!po) return res.status(404).json({ success: false, message: "PO not found" });
+
+    const GRN_STATUSES = ["GRN Pending", "GRN Variance", "GRN Variance", "GRN Fulfilled"];
+    if (!GRN_STATUSES.includes(po.status)) {
+      return res.json({ success: true, message: "PO is not in a GRN status — no change needed", status: po.status });
+    }
+
+    const allGrns = await GRN.find({ poId: po.id, status: { $ne: "Merged" }, isActive: { $ne: false } });
+    let allFulfilled = true;
+    let anyOverReceived = false;
+    let anyReceived = false;
+    for (const poItem of po.items) {
+      const totalReceived = allGrns.reduce((sum, g) => {
+        const grnItem = g.items.find((i) => i.sku === poItem.sku);
+        return sum + (grnItem?.received || 0);
+      }, 0);
+      if (totalReceived > 0) anyReceived = true;
+      if (totalReceived < (poItem.qty || 0)) {
+        allFulfilled = false;
+      } else if (totalReceived > (poItem.qty || 0)) {
+        anyOverReceived = true;
+      }
+    }
+    const newStatus = allFulfilled ? "GRN Fulfilled" : anyOverReceived ? "GRN Variance" : (!allFulfilled && anyReceived) ? "GRN Variance" : "GRN Pending";
+
+    if (po.status !== newStatus) {
+      po.status = newStatus;
+      await po.save({ validateModifiedOnly: true });
+      logAudit(req.user, "UPDATE", "PurchaseOrder", po.id, { action: "sync_grn_status", newStatus });
+      broadcast({ type: "DATA_UPDATED", path: "pos" });
+    }
+    res.json({ success: true, status: newStatus });
+  } catch (error) {
+    logger.error("sync-grn-status error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
