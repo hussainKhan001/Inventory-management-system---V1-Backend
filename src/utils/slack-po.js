@@ -14,7 +14,7 @@ const APPROVED_BY_LABEL = {
 
 export async function sendSlackApprovalMessage({ level, poId, supplier, companyName, totalValue, project, approvedBy, approverName, channelId, dmUserId }) {
   const token = process.env.SLACK_BOT_TOKEN;
-  const channel = channelId || process.env.SLACK_CHANNEL_ID;
+  const channel = channelId || "";
   if (!token || (!channel && !dmUserId)) {
     console.warn(`[Slack] No channel/DM configured for L${level} approval on ${poId} — skipping`);
     return;
