@@ -464,6 +464,35 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
         "priceComparison", "paymentApprovals", "paymentHistory", "closedItems", "approverSnapshot"]);
       const scalarChanged = changedFields.filter((k) => !SKIP_DIFF_KEYS.has(k));
       const changes = buildDiff(preSnapshot, data, scalarChanged);
+
+      // Per-item qty diff — shows "Item: <name>": old qty → new qty in audit trail
+      if (changedFields.includes("items") && Array.isArray(preSnapshot.items) && Array.isArray(data.items)) {
+        const getKey = (i) => i.sku || i.materialName || i.itemName || i.name;
+        const oldMap = new Map(preSnapshot.items.map(i => [getKey(i), i]));
+        const newMap = new Map(data.items.map(i => [getKey(i), i]));
+        const itemDiffs = [];
+        for (const [key, oldI] of oldMap) {
+          const newI = newMap.get(key);
+          const label = oldI.materialName || oldI.itemName || oldI.name || key;
+          if (!newI) {
+            itemDiffs.push({ field: `Item: ${label}`, oldValue: `${oldI.qty}${oldI.unit ? " " + oldI.unit : ""}`, newValue: "Removed" });
+          } else if (oldI.qty !== newI.qty) {
+            itemDiffs.push({ field: `Item: ${label}`, oldValue: `${oldI.qty}${oldI.unit ? " " + oldI.unit : ""}`, newValue: `${newI.qty}${newI.unit ? " " + newI.unit : ""}` });
+          }
+        }
+        for (const [key, newI] of newMap) {
+          if (!oldMap.has(key)) {
+            const label = newI.materialName || newI.itemName || newI.name || key;
+            itemDiffs.push({ field: `Item: ${label}`, oldValue: "—", newValue: `${newI.qty}${newI.unit ? " " + newI.unit : ""}` });
+          }
+        }
+        changes.push(...itemDiffs);
+        // Remove the generic "items" tag from changedFields since per-item diffs are now in changes
+        if (itemDiffs.length > 0) {
+          const idx = changedFields.indexOf("items");
+          if (idx !== -1) changedFields.splice(idx, 1);
+        }
+      }
       const auditAction = item.status !== oldStatus
         ? item.status?.includes("Approved") ? "APPROVE" : item.status?.includes("Reject") ? "REJECT" : "UPDATE"
         : "UPDATE";

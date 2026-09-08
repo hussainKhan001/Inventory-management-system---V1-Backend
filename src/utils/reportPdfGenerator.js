@@ -22,10 +22,19 @@ function fit(doc, text, maxWidth) {
   return s + "…";
 }
 
+// Parse a formatted cell value (e.g. "₹1,23,456") back into a number for summing
+function parseNum(v) {
+  if (typeof v === "number") return v;
+  if (typeof v !== "string") return 0;
+  const n = Number(v.replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
 /**
  * Generic table-based report PDF.
  * @param {string}   title
- * @param {Array}    columns  [{header, key, width, align?}]  — widths must sum to usable page width
+ * @param {Array}    columns  [{header, key, width, align?, sum?}]  — widths must sum to usable page width;
+ *                            columns with sum:true get totalled in a TOTAL row at the bottom
  * @param {Array}    rows     array of plain objects keyed by column.key
  * @param {string}   rangeLabel
  * @param {string}   [footerTag]
@@ -116,6 +125,32 @@ export function generateTableReport(title, columns, rows, rangeLabel, footerTag 
 
       y += ROW_H;
     });
+
+    // ── Totals row ─────────────────────────────────────────────────────────────
+    const sumCols = columns.filter(c => c.sum);
+    if (sumCols.length > 0) {
+      if (y + ROW_H > doc.page.height - 50) {
+        doc.addPage();
+        y = MARGIN;
+        y = drawHeader(y);
+      }
+      doc.rect(MARGIN, y, W, ROW_H).fill(C.tblHead);
+      doc.font("Helvetica-Bold").fontSize(FONT_BODY).fillColor(C.tblHeadTxt);
+      let cx = MARGIN + PAD;
+      columns.forEach((col, idx) => {
+        const cellW = col.width - PAD * 2;
+        let text = "";
+        if (idx === 0) {
+          text = "TOTAL";
+        } else if (col.sum) {
+          const total = rows.reduce((acc, row) => acc + parseNum(row[col.key]), 0);
+          text = col.header.includes("₹") ? `₹${total.toLocaleString("en-IN")}` : String(total);
+        }
+        doc.text(fit(doc, text, cellW), cx, y + 5, { width: cellW, lineBreak: false, align: col.align || "left" });
+        cx += col.width;
+      });
+      y += ROW_H;
+    }
 
     // ── Footer ─────────────────────────────────────────────────────────────────
     doc.font("Helvetica").fontSize(8).fillColor(C.labelTxt)

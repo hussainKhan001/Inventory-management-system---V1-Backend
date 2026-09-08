@@ -1,6 +1,6 @@
 import cron from "node-cron";
 import {
-  MaterialRequirement, PurchaseOrder, GRN, Inventory, Inward,
+  MaterialRequirement, PurchaseOrder, GRN, Inventory, Inward, Outward,
   Quotation, Supplier, Catalogue, AuditLog, MaterialPlan, AccountEntry, Settings,
 } from "./models/index.js";
 import { logger } from "./utils/logger.js";
@@ -80,8 +80,8 @@ const MODULE_CONFIG = {
       { header: "Project",  key: "project",      width: 90  },
       { header: "Status",   key: "status",       width: 90  },
       { header: "Priority", key: "priority",     width: 55  },
-      { header: "Total (₹)",key: "totalValue",   width: 60, align: "right" },
-      { header: "Items",    key: "_itemCount",   width: 30, align: "right" },
+      { header: "Total (₹)",key: "totalValue",   width: 60, align: "right", sum: true },
+      { header: "Items",    key: "_itemCount",   width: 30, align: "right", sum: true },
     ],
     map: (doc) => ({
       id:          doc.id,
@@ -106,7 +106,7 @@ const MODULE_CONFIG = {
       { header: "Challan",   key: "challan",   width: 70  },
       { header: "Doc Type",  key: "docType",   width: 70  },
       { header: "Status",    key: "status",    width: 70  },
-      { header: "Items",     key: "_items",    width: 45, align: "right" },
+      { header: "Items",     key: "_items",    width: 45, align: "right", sum: true },
     ],
     map: (doc) => ({
       id:       doc.id,
@@ -128,10 +128,10 @@ const MODULE_CONFIG = {
       { header: "SKU",       key: "sku",          width: 80  },
       { header: "Item Name", key: "itemName",     width: 130 },
       { header: "Category",  key: "category",     width: 80  },
-      { header: "Available", key: "availableQty", width: 55, align: "right" },
-      { header: "Allocated", key: "allocatedQty", width: 55, align: "right" },
-      { header: "Issued",    key: "issuedQty",    width: 50, align: "right" },
-      { header: "Total",     key: "totalStock",   width: 65, align: "right" },
+      { header: "Available", key: "availableQty", width: 55, align: "right", sum: true },
+      { header: "Allocated", key: "allocatedQty", width: 55, align: "right", sum: true },
+      { header: "Issued",    key: "issuedQty",    width: 50, align: "right", sum: true },
+      { header: "Total",     key: "totalStock",   width: 65, align: "right", sum: true },
     ],
     map: (doc) => ({
       sku:          doc.sku,
@@ -149,26 +149,66 @@ const MODULE_CONFIG = {
     label: "Inward Transactions Report",
     filePrefix: "Inward-Report",
     slackTitle: "Inward Report",
-    fetch: async (start, end) =>
-      Inward.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean(),
+    fetch: async (start, end) => {
+      const docs = await Inward.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean();
+      const codes = [...new Set(docs.map(d => d.supplier).filter(Boolean))];
+      const suppliers = codes.length
+        ? await Supplier.find({ id: { $in: codes } }, { id: 1, companyName: 1 }).lean()
+        : [];
+      const nameByCode = new Map(suppliers.map(s => [s.id, s.companyName]));
+      return docs.map(d => ({ ...d, _supplierName: nameByCode.get(d.supplier) || d.supplier }));
+    },
     columns: [
       { header: "Inward ID",  key: "id",        width: 80  },
       { header: "Date",       key: "date",      width: 70  },
       { header: "Type",       key: "type",      width: 80  },
       { header: "Supplier",   key: "supplier",  width: 100 },
       { header: "Project",    key: "project",   width: 100 },
-      { header: "Items",      key: "_items",    width: 45, align: "right" },
+      { header: "Items",      key: "_items",    width: 45, align: "right", sum: true },
       { header: "Status",     key: "status",    width: 40  },
     ],
     map: (doc) => ({
       id:       doc.id,
       date:     doc.date     || "—",
       type:     doc.type     || "—",
-      supplier: doc.supplier || doc.vendor || "—",
+      supplier: doc._supplierName || doc.vendor || "—",
       project:  doc.project  || "—",
       _items:   doc.items?.length || 0,
       status:   doc.status   || "—",
     }),
+  },
+  Outward: {
+    label: "Outward Transactions Report",
+    filePrefix: "Outward-Report",
+    slackTitle: "Outward Report",
+    fetch: async (start, end) =>
+      Outward.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean(),
+    columns: [
+      { header: "Outward ID", key: "id",        width: 80  },
+      { header: "Date",       key: "date",      width: 70  },
+      { header: "Type",       key: "type",      width: 80  },
+      { header: "Handover To",key: "handoverTo",width: 100 },
+      { header: "Project",    key: "project",   width: 100 },
+      { header: "Items",      key: "_items",    width: 45, align: "right", sum: true },
+      { header: "Status",     key: "status",    width: 40  },
+    ],
+    map: (doc) => ({
+      id:         doc.id,
+      date:       doc.date       || "—",
+      type:       doc.type       || "—",
+      handoverTo: doc.handoverTo || "—",
+      project:    doc.project    || "—",
+      _items:     doc.items?.length || 0,
+      status:     doc.transferStatus || doc.status || "—",
+    }),
+  },
+  PendingMR: {
+    label: "Pending Material Requirements Report",
+    filePrefix: "PendingMR-Report",
+    slackTitle: "Pending MR Report",
+    // Pending MRs is a status snapshot — no date filter
+    custom: true,
+    ignoreDateFilter: true,
   },
   Quotation: {
     label: "Quotations Report",
@@ -181,7 +221,7 @@ const MODULE_CONFIG = {
       { header: "Supplier",   key: "supplierName", width: 120 },
       { header: "MR ID",      key: "mrId",         width: 80  },
       { header: "Status",     key: "status",       width: 65  },
-      { header: "Amount (₹)", key: "totalAmount",  width: 90, align: "right" },
+      { header: "Amount (₹)", key: "totalAmount",  width: 90, align: "right", sum: true },
       { header: "Date",       key: "date",         width: 80  },
     ],
     map: (doc) => ({
@@ -203,8 +243,8 @@ const MODULE_CONFIG = {
       { header: "PO ID",       key: "id",            width: 80  },
       { header: "Supplier",    key: "supplier",      width: 100 },
       { header: "Project",     key: "project",       width: 85  },
-      { header: "Total (₹)",   key: "totalValue",    width: 75, align: "right" },
-      { header: "Paid (₹)",    key: "totalPaid",     width: 75, align: "right" },
+      { header: "Total (₹)",   key: "totalValue",    width: 75, align: "right", sum: true },
+      { header: "Paid (₹)",    key: "totalPaid",     width: 75, align: "right", sum: true },
       { header: "Acct Status", key: "accountStatus", width: 100 },
     ],
     map: (doc) => ({
@@ -226,8 +266,8 @@ const MODULE_CONFIG = {
       { header: "PO ID",      key: "poId",          width: 80  },
       { header: "Supplier",   key: "supplier",      width: 100 },
       { header: "Project",    key: "project",       width: 90  },
-      { header: "Payable(₹)", key: "payableAmount", width: 80, align: "right" },
-      { header: "Paid (₹)",   key: "totalPaid",     width: 80, align: "right" },
+      { header: "Payable(₹)", key: "payableAmount", width: 80, align: "right", sum: true },
+      { header: "Paid (₹)",   key: "totalPaid",     width: 80, align: "right", sum: true },
       { header: "Status",     key: "accountStatus", width: 85  },
     ],
     map: (doc) => ({
@@ -251,7 +291,7 @@ const MODULE_CONFIG = {
       { header: "Milestone", key: "milestone", width: 90  },
       { header: "Engineer",  key: "engineer",  width: 90  },
       { header: "Status",    key: "status",    width: 80  },
-      { header: "Items",     key: "_items",    width: 65, align: "right" },
+      { header: "Items",     key: "_items",    width: 65, align: "right", sum: true },
     ],
     map: (doc) => ({
       id:        doc.id,
@@ -368,6 +408,12 @@ export async function sendModuleReport(moduleKey, dataRange = "today", slackIds 
     }).sort({ createdAt: 1 }).lean();
     recordCount = mrs.length;
     pdfBuffer = await generateMRReportPDF(mrs, rangeLabel);
+  } else if (moduleKey === "PendingMR") {
+    const mrs = await MaterialRequirement.find({
+      status: "Store Pending",
+    }).sort({ createdAt: 1 }).lean();
+    recordCount = mrs.length;
+    pdfBuffer = await generateMRReportPDF(mrs, rangeLabel);
   } else {
     const docs = cfg.ignoreDateFilter
       ? await cfg.fetch()
@@ -389,7 +435,8 @@ export async function sendModuleReport(moduleKey, dataRange = "today", slackIds 
   // ── Direct Slack upload ──────────────────────────────────────────────────────
   const COUNT_LABELS = {
     MR: "MRs", PO: "POs", GRN: "GRNs", Inventory: "Items",
-    Inward: "Transactions", Quotation: "Quotations", "PO-Report": "POs",
+    Inward: "Transactions", Outward: "Transactions", PendingMR: "MRs",
+    Quotation: "Quotations", "PO-Report": "POs",
     Accounts: "Entries", MaterialPlan: "Plans", Suppliers: "Suppliers",
     Catalogue: "Items", AuditLog: "Logs",
   };
