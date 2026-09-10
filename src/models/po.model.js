@@ -159,6 +159,7 @@ const POSchema = new Schema({
   unloadingGstType: { type: String, enum: ["Inclusive","Exclusive"], default: "Exclusive" },
   closedItems: { type: [Schema.Types.Mixed], default: undefined },
   approverSnapshot: { type: Schema.Types.Mixed, default: undefined },
+  source: { type: String, enum: ["Manual", "Auto-Reorder"], default: "Manual" },
 }, { timestamps: true });
 
 POSchema.index({ project: 1 });

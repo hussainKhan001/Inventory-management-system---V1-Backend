@@ -19,6 +19,7 @@ function sanitizeFilter(raw) {
 }
 import { createNotification } from "../utils/notification.js";
 import { triggerN8nWebhook, checkAndFireLowStockWebhook } from "../utils/webhook.js";
+import { checkAutoReorder } from "../utils/autoReorderTrigger.js";
 import { broadcast } from "../utils/broadcaster.js";
 import { createCrudRoutes } from "../utils/crud.js";
 import { logAudit } from "../utils/audit.js";
@@ -417,6 +418,10 @@ router.post("/outward", authenticate, async (req, res) => {
     });
     await triggerN8nWebhook("OUTWARD", { transactionId: data.id, ...data });
     await checkAndFireLowStockWebhook(body.items.map((i) => i.sku));
+    // Fire-and-forget — must never block or slow down this response
+    checkAutoReorder(body.items.map((i) => i.sku), body.store).catch((err) =>
+      console.error("[AutoReorder] Outward hook failed:", err.message)
+    );
     res.json({ success: true, data: outward[0] });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });

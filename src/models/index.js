@@ -25,3 +25,4 @@ export { AccountEntry }           from "./account.model.js";
 export { MasterPO }               from "./master-po.model.js";
 export { MasterPOLedger }         from "./master-po-ledger.model.js";
 export { ExtraMaterialRequest }   from "./emr.model.js";
+export { ReorderRule }            from "./reorder-rule.model.js";

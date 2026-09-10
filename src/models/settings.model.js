@@ -94,6 +94,12 @@ const SettingsSchema = new Schema({
     recipientUserIds:{ type: [String], default: [] },
   },
   reportAutomations: { type: Array, default: [] },
+
+  // Auto-PO on Low Stock
+  autoReorder: {
+    enabled:       { type: Boolean, default: false },
+    staleRateDays: { type: Number, default: 90 },
+  },
 }, { timestamps: true });
 
 export const Settings = mongoose.model("Settings", SettingsSchema);
