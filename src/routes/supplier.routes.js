@@ -68,7 +68,7 @@ router.get("/pdf", async (req, res) => {
   }
 });
 
-createCrudRoutes(router, Supplier, "suppliers", "id", void 0, "SUPPLIER");
+createCrudRoutes(router, Supplier, "suppliers", "id", void 0, "SUPPLIER", { softDelete: true });
 var stdin_default = router;
 export {
   stdin_default as default

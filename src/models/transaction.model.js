@@ -55,6 +55,10 @@ const InwardSchema = new Schema({
   grnRef:             String,
   extras:             { type: mongoose.Schema.Types.Mixed, default: {} },
   items:              { type: [InwardItemSchema], required: true },
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true, collection: "inwards" });
 
 InwardSchema.index({ project: 1 });
@@ -102,6 +106,10 @@ const OutwardSchema = new Schema({
     updatedAt:  String,
     changes:    { type: mongoose.Schema.Types.Mixed },
   }],
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 OutwardSchema.index({ project: 1 });
@@ -128,6 +136,10 @@ const InwardReturnSchema = new Schema({
   materialPhotoUrl: String,
   challanPhotoUrl:  String,
   items:            { type: [TransactionItemSchema], required: true },
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 InwardReturnSchema.index({ project: 1 });
@@ -151,6 +163,10 @@ const OutwardReturnSchema = new Schema({
   personPhotos:     [String],
   materialPhotoUrl: String,
   items:            { type: [TransactionItemSchema], required: true },
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 OutwardReturnSchema.index({ project: 1 });
@@ -189,6 +205,10 @@ const TransactionSchema = new Schema({
   personName:         String,
   mrId:               String,
   poId:               String,
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 TransactionSchema.index({ type: 1 });

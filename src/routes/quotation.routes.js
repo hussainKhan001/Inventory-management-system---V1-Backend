@@ -78,7 +78,7 @@ router.put("/:id", authenticate, async (req, res) => {
     res.status(400).json({ success: false, message: error.message });
   }
 });
-createCrudRoutes(router, Quotation, "quotations", "id", void 0, "QUOTATION");
+createCrudRoutes(router, Quotation, "quotations", "id", void 0, "QUOTATION", { softDelete: true });
 var stdin_default = router;
 export {
   stdin_default as default

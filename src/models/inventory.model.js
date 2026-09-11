@@ -26,6 +26,10 @@ const InventorySchema = new Schema({
   sourceSite:    String,
   lastProject:   String,
   locationStock: { type: Map, of: Number, default: {} },
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 InventorySchema.pre("save", async function () {

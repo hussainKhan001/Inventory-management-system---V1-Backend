@@ -98,6 +98,6 @@ router.post("/:id/reject", authenticate, async (req, res) => {
   }
 });
 
-createCrudRoutes(router, ExtraMaterialRequest, "emr", "id", "EMR", "EMR");
+createCrudRoutes(router, ExtraMaterialRequest, "emr", "id", "EMR", "EMR", { softDelete: true });
 
 export default router;

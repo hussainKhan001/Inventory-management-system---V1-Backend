@@ -10,6 +10,10 @@ const WriteOffSchema = new Schema({
   requestedBy: String,
   date:        String,
   status:      { type: String, enum: ["Pending","Approved","Rejected"], default: "Pending" },
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 export const WriteOff = mongoose.model("WriteOff", WriteOffSchema);

@@ -73,7 +73,7 @@ const MODULE_CONFIG = {
     filePrefix: "PO-Report",
     slackTitle: "PO Report",
     fetch: async (start, end) =>
-      PurchaseOrder.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean(),
+      PurchaseOrder.find({ createdAt: { $gte: start, $lte: end }, isDeleted: { $ne: true } }).sort({ createdAt: 1 }).lean(),
     columns: [
       { header: "PO ID",    key: "id",          width: 80  },
       { header: "Supplier", key: "supplier",     width: 110 },
@@ -98,7 +98,7 @@ const MODULE_CONFIG = {
     filePrefix: "GRN-Report",
     slackTitle: "GRN Report",
     fetch: async (start, end) =>
-      GRN.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean(),
+      GRN.find({ createdAt: { $gte: start, $lte: end }, isDeleted: { $ne: true } }).sort({ createdAt: 1 }).lean(),
     columns: [
       { header: "GRN ID",    key: "id",        width: 80  },
       { header: "Supplier",  key: "supplier",  width: 110 },
@@ -123,7 +123,7 @@ const MODULE_CONFIG = {
     filePrefix: "Inventory-Report",
     slackTitle: "Inventory Report",
     // Inventory is a snapshot — no date filter
-    fetch: async () => Inventory.find({}).sort({ category: 1, itemName: 1 }).lean(),
+    fetch: async () => Inventory.find({ isDeleted: { $ne: true } }).sort({ category: 1, itemName: 1 }).lean(),
     columns: [
       { header: "SKU",       key: "sku",          width: 80  },
       { header: "Item Name", key: "itemName",     width: 130 },
@@ -150,7 +150,7 @@ const MODULE_CONFIG = {
     filePrefix: "Inward-Report",
     slackTitle: "Inward Report",
     fetch: async (start, end) => {
-      const docs = await Inward.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean();
+      const docs = await Inward.find({ createdAt: { $gte: start, $lte: end }, isDeleted: { $ne: true } }).sort({ createdAt: 1 }).lean();
       const codes = [...new Set(docs.map(d => d.supplier).filter(Boolean))];
       const suppliers = codes.length
         ? await Supplier.find({ id: { $in: codes } }, { id: 1, companyName: 1 }).lean()
@@ -182,7 +182,7 @@ const MODULE_CONFIG = {
     filePrefix: "Outward-Report",
     slackTitle: "Outward Report",
     fetch: async (start, end) =>
-      Outward.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean(),
+      Outward.find({ createdAt: { $gte: start, $lte: end }, isDeleted: { $ne: true } }).sort({ createdAt: 1 }).lean(),
     columns: [
       { header: "Outward ID", key: "id",        width: 80  },
       { header: "Date",       key: "date",      width: 70  },
@@ -215,7 +215,7 @@ const MODULE_CONFIG = {
     filePrefix: "Quotation-Report",
     slackTitle: "Quotation Report",
     fetch: async (start, end) =>
-      Quotation.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean(),
+      Quotation.find({ createdAt: { $gte: start, $lte: end }, isDeleted: { $ne: true } }).sort({ createdAt: 1 }).lean(),
     columns: [
       { header: "Quote ID",   key: "id",           width: 80  },
       { header: "Supplier",   key: "supplierName", width: 120 },
@@ -238,7 +238,7 @@ const MODULE_CONFIG = {
     filePrefix: "PO-Financial-Report",
     slackTitle: "PO Financial Report",
     fetch: async (start, end) =>
-      PurchaseOrder.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean(),
+      PurchaseOrder.find({ createdAt: { $gte: start, $lte: end }, isDeleted: { $ne: true } }).sort({ createdAt: 1 }).lean(),
     columns: [
       { header: "PO ID",       key: "id",            width: 80  },
       { header: "Supplier",    key: "supplier",      width: 100 },
@@ -284,7 +284,7 @@ const MODULE_CONFIG = {
     filePrefix: "MaterialPlan-Report",
     slackTitle: "Material Plan Report",
     fetch: async (start, end) =>
-      MaterialPlan.find({ createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }).lean(),
+      MaterialPlan.find({ createdAt: { $gte: start, $lte: end }, isDeleted: { $ne: true } }).sort({ createdAt: 1 }).lean(),
     columns: [
       { header: "Plan ID",   key: "id",        width: 80  },
       { header: "Project",   key: "project",   width: 110 },
@@ -307,7 +307,7 @@ const MODULE_CONFIG = {
     filePrefix: "Suppliers-Report",
     slackTitle: "Suppliers Report",
     // Suppliers don't have a meaningful date range — show all active
-    fetch: async () => Supplier.find({ status: { $ne: "Inactive" } }).sort({ companyName: 1 }).lean(),
+    fetch: async () => Supplier.find({ status: { $ne: "Inactive" }, isDeleted: { $ne: true } }).sort({ companyName: 1 }).lean(),
     ignoreDateFilter: true,
     columns: [
       { header: "Company",  key: "companyName",     width: 130 },
@@ -330,7 +330,7 @@ const MODULE_CONFIG = {
     label: "Catalogue Report",
     filePrefix: "Catalogue-Report",
     slackTitle: "Catalogue Report",
-    fetch: async () => Catalogue.find({}).sort({ category: 1, itemName: 1 }).lean(),
+    fetch: async () => Catalogue.find({ isDeleted: { $ne: true } }).sort({ category: 1, itemName: 1 }).lean(),
     ignoreDateFilter: true,
     columns: [
       { header: "SKU",      key: "sku",      width: 80  },
@@ -405,12 +405,14 @@ export async function sendModuleReport(moduleKey, dataRange = "today", slackIds 
   if (moduleKey === "MR") {
     const mrs = await MaterialRequirement.find({
       createdAt: { $gte: start, $lte: end },
+      isDeleted: { $ne: true },
     }).sort({ createdAt: 1 }).lean();
     recordCount = mrs.length;
     pdfBuffer = await generateMRReportPDF(mrs, rangeLabel);
   } else if (moduleKey === "PendingMR") {
     const mrs = await MaterialRequirement.find({
       status: "Store Pending",
+      isDeleted: { $ne: true },
     }).sort({ createdAt: 1 }).lean();
     recordCount = mrs.length;
     pdfBuffer = await generateMRReportPDF(mrs, rangeLabel);

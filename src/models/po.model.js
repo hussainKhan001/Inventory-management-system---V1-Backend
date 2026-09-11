@@ -160,6 +160,10 @@ const POSchema = new Schema({
   closedItems: { type: [Schema.Types.Mixed], default: undefined },
   approverSnapshot: { type: Schema.Types.Mixed, default: undefined },
   source: { type: String, enum: ["Manual", "Auto-Reorder"], default: "Manual" },
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 POSchema.index({ project: 1 });

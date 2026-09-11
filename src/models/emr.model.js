@@ -31,6 +31,10 @@ const ExtraMaterialRequestSchema = new Schema({
   rejectionReason:  String,
   linkedMasterPoId: String,
   remark:           String,
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 ExtraMaterialRequestSchema.index({ masterPoId: 1 });

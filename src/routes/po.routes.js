@@ -30,7 +30,7 @@ router.get("/occupied-mrs", authenticate, async (req, res) => {
 
     // Source 1: POs that have quotationId stored directly
     const activePOs = await PurchaseOrder.find(
-      { quotationId: { $exists: true, $ne: "" }, status: { $nin: RELEASED } },
+      { quotationId: { $exists: true, $ne: "" }, status: { $nin: RELEASED }, isDeleted: { $ne: true } },
       { quotationId: 1, _id: 0 }
     ).lean();
     const fromPOs = activePOs.map((p) => p.quotationId).filter(Boolean);
@@ -44,7 +44,7 @@ router.get("/occupied-mrs", authenticate, async (req, res) => {
     const activeLinkedPoIds = linkedPoIds.length
       ? new Set(
           (await PurchaseOrder.find(
-            { id: { $in: linkedPoIds }, status: { $nin: RELEASED } },
+            { id: { $in: linkedPoIds }, status: { $nin: RELEASED }, isDeleted: { $ne: true } },
             { id: 1, _id: 0 }
           ).lean()).map((p) => p.id)
         )
@@ -56,7 +56,7 @@ router.get("/occupied-mrs", authenticate, async (req, res) => {
     // Source 3: Legacy POs (no quotationId, no linkedPoId on quotation) — match by mrId + workType + supplier name
     const alreadyCovered = new Set([...fromPOs, ...fromQuotes]);
     const legacyPOs = await PurchaseOrder.find(
-      { $or: [{ quotationId: { $exists: false } }, { quotationId: "" }], mrId: { $exists: true, $ne: "" }, status: { $nin: RELEASED } },
+      { $or: [{ quotationId: { $exists: false } }, { quotationId: "" }], mrId: { $exists: true, $ne: "" }, status: { $nin: RELEASED }, isDeleted: { $ne: true } },
       { mrId: 1, workType: 1, supplier: 1, _id: 0 }
     ).lean();
 
@@ -595,7 +595,7 @@ router.post("/:id/sync-grn-status", authenticate, async (req, res) => {
       return res.json({ success: true, message: "PO is not in a GRN status — no change needed", status: po.status });
     }
 
-    const allGrns = await GRN.find({ poId: po.id, status: { $ne: "Merged" }, isActive: { $ne: false } });
+    const allGrns = await GRN.find({ poId: po.id, status: { $ne: "Merged" }, isActive: { $ne: false }, isDeleted: { $ne: true } });
     let allFulfilled = true;
     let anyOverReceived = false;
     let anyReceived = false;
@@ -626,7 +626,7 @@ router.post("/:id/sync-grn-status", authenticate, async (req, res) => {
   }
 });
 
-createCrudRoutes(router, PurchaseOrder, "pos", "id", "PURCHASE_ORDERS", "PURCHASE_ORDER");
+createCrudRoutes(router, PurchaseOrder, "pos", "id", "PURCHASE_ORDERS", "PURCHASE_ORDER", { softDelete: true });
 var stdin_default = router;
 export {
   stdin_default as default

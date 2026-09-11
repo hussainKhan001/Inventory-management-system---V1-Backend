@@ -35,9 +35,20 @@ const cascadeDeleteMR = /* @__PURE__ */ __name(async (mrId) => {
   broadcast({ type: "DATA_UPDATED", path: "quotations" });
   broadcast({ type: "DATA_UPDATED", path: "mr-allocations" });
 }, "cascadeDeleteMR");
-const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, idField = "id", overrideBasePerm, webhookEventPrefix) => {
+// Soft-delete helper — shared by every resource opted into the recycle bin (see `softDelete`
+// option on createCrudRoutes). Marks the doc deleted in place rather than removing it.
+async function softDeleteDoc(doc, user) {
+  doc.isDeleted = true;
+  doc.deletedAt = new Date();
+  doc.deletedBy = user.name;
+  await doc.save({ validateModifiedOnly: true });
+}
+__name(softDeleteDoc, "softDeleteDoc");
+
+const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, idField = "id", overrideBasePerm, webhookEventPrefix, options = {}) => {
   const basePerm = overrideBasePerm || resourceName.toUpperCase().replace(/-/g, "_");
   const singularPerm = basePerm.endsWith("S") ? basePerm.slice(0, -1) : basePerm;
+  const softDelete = !!options.softDelete;
   router.get("/", authenticate, async (req, res) => {
     try {
       const page = parseInt(req.query.page) || 1;
@@ -101,6 +112,17 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
       if (filterStr) {
         const { startDate: _, endDate: __, ...restFilter } = crudFilter;
         query = { ...query, ...sanitizeFilter(restFilter) };
+      }
+      // Recycle bin: ?deleted=true lists only soft-deleted docs; otherwise they're hidden
+      if (softDelete) {
+        if (req.query.deleted === "true") {
+          if (!await serverHasPermission(req.user, `VIEW_RECYCLE_BIN_${singularPerm}`)) {
+            return res.status(403).json({ success: false, message: "Forbidden" });
+          }
+          query.isDeleted = true;
+        } else {
+          query.isDeleted = { $ne: true };
+        }
       }
       // Company-scoped visibility: company-specific approvers only see their assigned companies' POs
       if (resourceName === "pos") {
@@ -692,7 +714,10 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
             message: `Cannot delete Material Requirement ${req.params.id} because a Purchase Order (${poExists.id}) has already been created for it. Only Super Admin can delete.`
           });
         }
-        await cascadeDeleteMR(req.params.id);
+        // Soft-delete only hides the MR itself — cascading Quotations/POs/Allocations would
+        // defeat the point of a recycle bin, so the hard-delete cascade only runs otherwise.
+        if (softDelete) await softDeleteDoc(itemToDelete, req.user);
+        else await cascadeDeleteMR(req.params.id);
       } else if (resourceName === "pos") {
         const po = itemToDelete;
         const isLocked = po.accountStatus === "Paid" || po.status === "PO Closed" || po.paymentStatus === "Paid";
@@ -702,7 +727,8 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
             message: `Cannot delete Purchase Order ${req.params.id} because payment has been processed or the PO is closed. Only Super Admin can delete.`
           });
         }
-        await POService.cascadeDeletePO(req.params.id);
+        if (softDelete) await softDeleteDoc(itemToDelete, req.user);
+        else await POService.cascadeDeletePO(req.params.id);
       } else if (resourceName === "suppliers") {
         const poExists = await PurchaseOrder.findOne({
           supplier: { $in: [itemToDelete.id, itemToDelete._id?.toString(), itemToDelete.companyName, itemToDelete.name].filter(Boolean) }
@@ -713,7 +739,8 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
             message: `Cannot delete Supplier ${itemToDelete.companyName} because Purchase Orders exist for this supplier.`
           });
         }
-        await model.findOneAndDelete({ [idField]: req.params.id });
+        if (softDelete) await softDeleteDoc(itemToDelete, req.user);
+        else await model.findOneAndDelete({ [idField]: req.params.id });
       } else if (resourceName === "inventory") {
         const transactionExists = await Transaction.findOne({ "items.sku": itemToDelete.sku });
         if (transactionExists) {
@@ -722,7 +749,8 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
             message: `Cannot delete Inventory item ${itemToDelete.sku} because it has transaction history.`
           });
         }
-        await model.findOneAndDelete({ [idField]: req.params.id });
+        if (softDelete) await softDeleteDoc(itemToDelete, req.user);
+        else await model.findOneAndDelete({ [idField]: req.params.id });
       } else if (resourceName === "quotations") {
         const quote = itemToDelete;
         const poExists = await PurchaseOrder.findOne({ mrId: quote.mrId, supplier: quote.supplierName });
@@ -739,9 +767,11 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
             message: `Cannot delete Quotation ${req.params.id} because it is the currently approved quotation for Material Requirement ${mrApproved.id}. Change the approved quotation first.`
           });
         }
-        await model.findOneAndDelete({ [idField]: req.params.id });
+        if (softDelete) await softDeleteDoc(itemToDelete, req.user);
+        else await model.findOneAndDelete({ [idField]: req.params.id });
       } else {
-        await model.findOneAndDelete({ [idField]: req.params.id });
+        if (softDelete) await softDeleteDoc(itemToDelete, req.user);
+        else await model.findOneAndDelete({ [idField]: req.params.id });
       }
       broadcast({ type: "DATA_UPDATED", path: resourceName });
       const snapshot = deletedItem?.toObject ? deletedItem.toObject() : deletedItem;
@@ -772,6 +802,48 @@ const createCrudRoutes = /* @__PURE__ */ __name((router, model, resourceName, id
       res.status(400).json({ success: false, message: error.message });
     }
   });
+
+  // ── Recycle bin: restore + permanent delete ──────────────────────────────
+  if (softDelete) {
+    router.post("/:id/restore", authenticate, async (req, res) => {
+      try {
+        if (!await serverHasPermission(req.user, `RESTORE_${singularPerm}`)) {
+          return res.status(403).json({ success: false, message: "Forbidden" });
+        }
+        const item = await model.findOne({ [idField]: req.params.id });
+        if (!item) return res.status(404).json({ success: false, message: "Not found" });
+        if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item is not in the recycle bin" });
+        item.isDeleted = false;
+        item.deletedAt = undefined;
+        item.deletedBy = undefined;
+        await item.save({ validateModifiedOnly: true });
+        broadcast({ type: "DATA_UPDATED", path: resourceName });
+        logAudit(req.user, "RESTORE", resourceName, req.params.id, { action: "Restored from Recycle Bin" });
+        res.json({ success: true, data: item });
+      } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+      }
+    });
+
+    router.delete("/:id/permanent", authenticate, async (req, res) => {
+      try {
+        const roleLower = (req.user.role || "").toLowerCase().trim();
+        const isSuperAdmin = ["super admin", "superadmin", "admin"].includes(roleLower);
+        if (!isSuperAdmin) {
+          return res.status(403).json({ success: false, message: "Only Super Admin can permanently delete." });
+        }
+        const item = await model.findOne({ [idField]: req.params.id });
+        if (!item) return res.status(404).json({ success: false, message: "Not found" });
+        if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item must be in the recycle bin before it can be permanently deleted." });
+        await model.findOneAndDelete({ [idField]: req.params.id });
+        broadcast({ type: "DATA_UPDATED", path: resourceName });
+        logAudit(req.user, "DELETE", resourceName, req.params.id, { action: "Permanently Deleted" });
+        res.json({ success: true });
+      } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+      }
+    });
+  }
 }, "createCrudRoutes");
 export {
   cascadeDeleteMR,

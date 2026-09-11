@@ -242,13 +242,20 @@ router.put("/inward/:id", authenticate, async (req, res) => {
 });
 router.delete("/inward/:id", authenticate, async (req, res) => {
   try {
+    if (!await serverHasPermission(req.user, "DELETE_INWARD")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
     const item = await Inward.findOne({ id: req.params.id });
     if (item) {
+      if (item.isDeleted) return res.status(400).json({ success: false, message: "Already in the recycle bin" });
       for (const it of item.items) {
         await updateStock("Inward", it.sku, it.itemName, -it.qty, it.unit || "NOS", item.category || "General", null, item.store);
       }
-      await Inward.findOneAndDelete({ id: req.params.id });
-      await Transaction.findOneAndDelete({ id: req.params.id });
+      item.isDeleted = true;
+      item.deletedAt = new Date();
+      item.deletedBy = req.user.name;
+      await item.save({ validateModifiedOnly: true });
+      await Transaction.findOneAndUpdate({ id: req.params.id }, { isDeleted: true, deletedAt: new Date(), deletedBy: req.user.name });
       await createNotification({
         message: `Inward transaction ${req.params.id} was deleted by ${req.user.name}`,
         severity: "warning",
@@ -269,6 +276,52 @@ router.delete("/inward/:id", authenticate, async (req, res) => {
     broadcast({ type: "DATA_UPDATED", path: "inward" });
     broadcast({ type: "DATA_UPDATED", path: "inventory" });
     broadcast({ type: "DATA_UPDATED", path: "transactions" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+// Recycle bin: restore re-applies the inward's stock effect (same math as creation)
+router.post("/inward/:id/restore", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "RESTORE_INWARD")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    const item = await Inward.findOne({ id: req.params.id });
+    if (!item) return res.status(404).json({ success: false, message: "Not found" });
+    if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item is not in the recycle bin" });
+    for (const it of item.items) {
+      await updateStock("Inward", it.sku, it.itemName, it.qty, it.unit || "NOS", item.category || "General", null, item.store);
+    }
+    item.isDeleted = false;
+    item.deletedAt = undefined;
+    item.deletedBy = undefined;
+    await item.save({ validateModifiedOnly: true });
+    await Transaction.findOneAndUpdate({ id: req.params.id }, { isDeleted: false, $unset: { deletedAt: "", deletedBy: "" } });
+    if ((item.type || "").includes("Transfer") && item.gatePassNo) {
+      await syncTransferOutwardStatus(item.gatePassNo);
+      broadcast({ type: "DATA_UPDATED", path: "outward" });
+    }
+    broadcast({ type: "DATA_UPDATED", path: "inward" });
+    broadcast({ type: "DATA_UPDATED", path: "inventory" });
+    broadcast({ type: "DATA_UPDATED", path: "transactions" });
+    res.json({ success: true, data: item });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+router.delete("/inward/:id/permanent", authenticate, async (req, res) => {
+  try {
+    const roleLower = (req.user.role || "").toLowerCase().trim();
+    if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
+      return res.status(403).json({ success: false, message: "Only Super Admin can permanently delete." });
+    }
+    const item = await Inward.findOne({ id: req.params.id });
+    if (!item) return res.status(404).json({ success: false, message: "Not found" });
+    if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item must be in the recycle bin first." });
+    await Inward.findOneAndDelete({ id: req.params.id });
+    await Transaction.findOneAndDelete({ id: req.params.id });
+    broadcast({ type: "DATA_UPDATED", path: "inward" });
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -619,6 +672,7 @@ router.delete("/outward/:id", authenticate, async (req, res) => {
     }
     const item = await Outward.findOne({ id: req.params.id });
     if (item) {
+      if (item.isDeleted) return res.status(400).json({ success: false, message: "Already in the recycle bin" });
       const effectiveMrId = item.mrId || item.mrNo;
       for (const it of item.items) {
         const inv = await Inventory.findOne({ sku: it.sku });
@@ -688,8 +742,11 @@ router.delete("/outward/:id", authenticate, async (req, res) => {
           await updateStock("Outward", it.sku, it.itemName, -it.qty, it.unit, item.category || "General", null, item.store);
         }
       }
-      await Outward.findOneAndDelete({ id: req.params.id });
-      await Transaction.findOneAndDelete({ id: req.params.id });
+      item.isDeleted = true;
+      item.deletedAt = new Date();
+      item.deletedBy = req.user.name;
+      await item.save({ validateModifiedOnly: true });
+      await Transaction.findOneAndUpdate({ id: req.params.id }, { isDeleted: true, deletedAt: new Date(), deletedBy: req.user.name });
       await createNotification({
         message: `Outward transaction ${req.params.id} was deleted by ${req.user.name}`,
         severity: "warning",
@@ -707,6 +764,104 @@ router.delete("/outward/:id", authenticate, async (req, res) => {
     broadcast({ type: "DATA_UPDATED", path: "transactions" });
     broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
     broadcast({ type: "DATA_UPDATED", path: "mr-allocations" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+// Recycle bin: restore re-applies the outward's effect, mirroring the original
+// creation logic exactly (consume current MRAllocation.remainingQty the same way
+// a fresh outward would) rather than trying to invert the specific delete-time math.
+router.post("/outward/:id/restore", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "RESTORE_OUTWARD")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    const item = await Outward.findOne({ id: req.params.id });
+    if (!item) return res.status(404).json({ success: false, message: "Not found" });
+    if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item is not in the recycle bin" });
+    const effectiveMrId = item.mrId || item.mrNo;
+    if (effectiveMrId) {
+      const mr = await MaterialRequirement.findOne({ id: effectiveMrId });
+      if (!mr) return res.status(400).json({ success: false, message: `Material Requirement ${effectiveMrId} not found — cannot restore` });
+      for (const it of item.items) {
+        const inv = await Inventory.findOne({ sku: it.sku });
+        if (!inv) return res.status(400).json({ success: false, message: `Inventory not found for SKU ${it.sku} — cannot restore` });
+        let allocation = await MRAllocation.findOne({ mrId: effectiveMrId, sku: it.sku });
+        const mrItem = mr.items.find((mi) => mi.sku === it.sku);
+        let fromAllocation = 0;
+        if (allocation && allocation.remainingQty > 0) {
+          fromAllocation = Math.min(it.qty, allocation.remainingQty);
+        }
+        const fromAvailable = it.qty - fromAllocation;
+        // Validate sufficiency before committing any mutation — stock may have moved
+        // since this outward was deleted, so restore must not silently floor at 0
+        // while still crediting the full qty to issuedQty (that would fabricate stock).
+        if (item.store && getSiteStock(inv, item.store) < it.qty) {
+          return res.status(400).json({ success: false, message: `Insufficient stock at ${item.store} for ${it.itemName}. Available: ${getSiteStock(inv, item.store)}, Requested: ${it.qty}. Restore aborted.` });
+        }
+        if (fromAvailable > 0 && (inv.availableQty || 0) < fromAvailable) {
+          return res.status(400).json({ success: false, message: `Insufficient stock for ${it.itemName}. Available: ${inv.availableQty || 0}, Needed: ${fromAvailable}. Restore aborted.` });
+        }
+        if (allocation) {
+          allocation.issuedQty = (allocation.issuedQty || 0) + fromAllocation;
+          allocation.remainingQty = (allocation.remainingQty || 0) - fromAllocation;
+          allocation.status = allocation.remainingQty === 0 ? "Closed" : "Partially Issued";
+          await allocation.save({});
+        }
+        if (mrItem) {
+          mrItem.issuedQty = (mrItem.issuedQty || 0) + it.qty;
+          mrItem.status = mrItem.issuedQty >= mrItem.qty ? "Issued" : "Partial";
+        }
+        inv.liveStock = Math.max(0, (inv.liveStock || 0) - it.qty);
+        inv.allocatedQty = Math.max(0, (inv.allocatedQty || 0) - fromAllocation);
+        inv.issuedQty = (inv.issuedQty || 0) + it.qty;
+        inv.availableQty = Math.max(0, (inv.liveStock || 0) - inv.allocatedQty);
+        if (item.store) {
+          applyStoreDelta(inv, item.store, Math.max(0, getSiteStock(inv, item.store) - it.qty));
+        }
+        await inv.save({});
+      }
+      const allItemsFulfilled = mr.items.every((i) => (i.issuedQty || 0) >= i.qty);
+      const someIssued = mr.items.some((i) => (i.issuedQty || 0) > 0);
+      if (allItemsFulfilled && someIssued) mr.status = "Closed";
+      else if (someIssued) mr.status = "Partially Issued";
+      await mr.save({});
+    } else {
+      for (const it of item.items) {
+        await updateStock(
+          item.type === "Transfer" ? "Transfer Outward" : "Outward",
+          it.sku, it.itemName, it.qty, it.unit, item.category || "General", null, item.store
+        );
+      }
+    }
+    item.isDeleted = false;
+    item.deletedAt = undefined;
+    item.deletedBy = undefined;
+    await item.save({ validateModifiedOnly: true });
+    await Transaction.findOneAndUpdate({ id: req.params.id }, { isDeleted: false, $unset: { deletedAt: "", deletedBy: "" } });
+    broadcast({ type: "DATA_UPDATED", path: "outward" });
+    broadcast({ type: "DATA_UPDATED", path: "inventory" });
+    broadcast({ type: "DATA_UPDATED", path: "transactions" });
+    broadcast({ type: "DATA_UPDATED", path: "material-requirements" });
+    broadcast({ type: "DATA_UPDATED", path: "mr-allocations" });
+    res.json({ success: true, data: item });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+router.delete("/outward/:id/permanent", authenticate, async (req, res) => {
+  try {
+    const roleLower = (req.user.role || "").toLowerCase().trim();
+    if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
+      return res.status(403).json({ success: false, message: "Only Super Admin can permanently delete." });
+    }
+    const item = await Outward.findOne({ id: req.params.id });
+    if (!item) return res.status(404).json({ success: false, message: "Not found" });
+    if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item must be in the recycle bin first." });
+    await Outward.findOneAndDelete({ id: req.params.id });
+    await Transaction.findOneAndDelete({ id: req.params.id });
+    broadcast({ type: "DATA_UPDATED", path: "outward" });
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -802,13 +957,20 @@ router.put("/inward-returns/:id", authenticate, async (req, res) => {
 });
 router.delete("/inward-returns/:id", authenticate, async (req, res) => {
   try {
+    if (!await serverHasPermission(req.user, "DELETE_INWARD_RETURN")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
     const item = await InwardReturn.findOne({ id: req.params.id });
     if (item) {
+      if (item.isDeleted) return res.status(400).json({ success: false, message: "Already in the recycle bin" });
       for (const it of item.items) {
         await updateStock("Inward Return", it.sku, it.itemName, -it.qty, it.unit, "General", null, item.store);
       }
-      await InwardReturn.findOneAndDelete({ id: req.params.id });
-      await Transaction.findOneAndDelete({ id: req.params.id });
+      item.isDeleted = true;
+      item.deletedAt = new Date();
+      item.deletedBy = req.user.name;
+      await item.save({ validateModifiedOnly: true });
+      await Transaction.findOneAndUpdate({ id: req.params.id }, { isDeleted: true, deletedAt: new Date(), deletedBy: req.user.name });
       await createNotification({
         message: `Inward Return ${req.params.id} was deleted by ${req.user.name}`,
         severity: "warning",
@@ -824,6 +986,60 @@ router.delete("/inward-returns/:id", authenticate, async (req, res) => {
     broadcast({ type: "DATA_UPDATED", path: "inward-returns" });
     broadcast({ type: "DATA_UPDATED", path: "inventory" });
     broadcast({ type: "DATA_UPDATED", path: "transactions" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+// Recycle bin: restore re-applies the return's stock effect (same math as creation)
+router.post("/inward-returns/:id/restore", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "RESTORE_INWARD_RETURN")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    const item = await InwardReturn.findOne({ id: req.params.id });
+    if (!item) return res.status(404).json({ success: false, message: "Not found" });
+    if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item is not in the recycle bin" });
+    // Validate sufficiency before mutating — Inward Return consumes stock, and stock
+    // may have moved since deletion, so restore must not silently floor at 0.
+    for (const it of item.items) {
+      const invCheck = await Inventory.findOne({ sku: it.sku });
+      if (!invCheck) return res.status(400).json({ success: false, message: `Item not found in inventory: ${it.sku} — cannot restore` });
+      if (item.store) {
+        const siteStock = getSiteStock(invCheck, item.store);
+        if (siteStock < it.qty) return res.status(400).json({ success: false, message: `Insufficient stock at ${item.store} for ${it.itemName}. Available: ${siteStock}, Requested: ${it.qty}. Restore aborted.` });
+      } else if ((invCheck.availableQty || 0) < it.qty) {
+        return res.status(400).json({ success: false, message: `Insufficient stock to return for ${it.itemName}. Available: ${invCheck.availableQty || 0}, Requested: ${it.qty}. Restore aborted.` });
+      }
+    }
+    for (const it of item.items) {
+      await updateStock("Inward Return", it.sku, it.itemName, it.qty, it.unit, "General", null, item.store);
+    }
+    item.isDeleted = false;
+    item.deletedAt = undefined;
+    item.deletedBy = undefined;
+    await item.save({ validateModifiedOnly: true });
+    await Transaction.findOneAndUpdate({ id: req.params.id }, { isDeleted: false, $unset: { deletedAt: "", deletedBy: "" } });
+    broadcast({ type: "DATA_UPDATED", path: "inward-returns" });
+    broadcast({ type: "DATA_UPDATED", path: "inventory" });
+    broadcast({ type: "DATA_UPDATED", path: "transactions" });
+    res.json({ success: true, data: item });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+router.delete("/inward-returns/:id/permanent", authenticate, async (req, res) => {
+  try {
+    const roleLower = (req.user.role || "").toLowerCase().trim();
+    if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
+      return res.status(403).json({ success: false, message: "Only Super Admin can permanently delete." });
+    }
+    const item = await InwardReturn.findOne({ id: req.params.id });
+    if (!item) return res.status(404).json({ success: false, message: "Not found" });
+    if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item must be in the recycle bin first." });
+    await InwardReturn.findOneAndDelete({ id: req.params.id });
+    await Transaction.findOneAndDelete({ id: req.params.id });
+    broadcast({ type: "DATA_UPDATED", path: "inward-returns" });
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -890,13 +1106,20 @@ router.put("/outward-returns/:id", authenticate, async (req, res) => {
 });
 router.delete("/outward-returns/:id", authenticate, async (req, res) => {
   try {
+    if (!await serverHasPermission(req.user, "DELETE_OUTWARD_RETURN")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
     const item = await OutwardReturn.findOne({ id: req.params.id });
     if (item) {
+      if (item.isDeleted) return res.status(400).json({ success: false, message: "Already in the recycle bin" });
       for (const it of item.items) {
         await updateStock("Outward Return", it.sku, it.itemName, -it.qty, it.unit, "General", null, item.store);
       }
-      await OutwardReturn.findOneAndDelete({ id: req.params.id });
-      await Transaction.findOneAndDelete({ id: req.params.id });
+      item.isDeleted = true;
+      item.deletedAt = new Date();
+      item.deletedBy = req.user.name;
+      await item.save({ validateModifiedOnly: true });
+      await Transaction.findOneAndUpdate({ id: req.params.id }, { isDeleted: true, deletedAt: new Date(), deletedBy: req.user.name });
       await createNotification({
         message: `Outward Return ${req.params.id} was deleted by ${req.user.name}`,
         severity: "warning",
@@ -917,17 +1140,59 @@ router.delete("/outward-returns/:id", authenticate, async (req, res) => {
     res.status(400).json({ success: false, message: error.message });
   }
 });
+// Recycle bin: restore re-applies the return's stock effect (same math as creation)
+router.post("/outward-returns/:id/restore", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "RESTORE_OUTWARD_RETURN")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    const item = await OutwardReturn.findOne({ id: req.params.id });
+    if (!item) return res.status(404).json({ success: false, message: "Not found" });
+    if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item is not in the recycle bin" });
+    for (const it of item.items) {
+      await updateStock("Outward Return", it.sku, it.itemName, it.qty, it.unit, "General", null, item.store);
+    }
+    item.isDeleted = false;
+    item.deletedAt = undefined;
+    item.deletedBy = undefined;
+    await item.save({ validateModifiedOnly: true });
+    await Transaction.findOneAndUpdate({ id: req.params.id }, { isDeleted: false, $unset: { deletedAt: "", deletedBy: "" } });
+    broadcast({ type: "DATA_UPDATED", path: "outward-returns" });
+    broadcast({ type: "DATA_UPDATED", path: "inventory" });
+    broadcast({ type: "DATA_UPDATED", path: "transactions" });
+    res.json({ success: true, data: item });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+router.delete("/outward-returns/:id/permanent", authenticate, async (req, res) => {
+  try {
+    const roleLower = (req.user.role || "").toLowerCase().trim();
+    if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
+      return res.status(403).json({ success: false, message: "Only Super Admin can permanently delete." });
+    }
+    const item = await OutwardReturn.findOne({ id: req.params.id });
+    if (!item) return res.status(404).json({ success: false, message: "Not found" });
+    if (!item.isDeleted) return res.status(400).json({ success: false, message: "Item must be in the recycle bin first." });
+    await OutwardReturn.findOneAndDelete({ id: req.params.id });
+    await Transaction.findOneAndDelete({ id: req.params.id });
+    broadcast({ type: "DATA_UPDATED", path: "outward-returns" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
 const inwardCrudRouter = Router();
-createCrudRoutes(inwardCrudRouter, Inward, "inward", "id", void 0, "INWARD");
+createCrudRoutes(inwardCrudRouter, Inward, "inward", "id", void 0, "INWARD", { softDelete: true });
 router.use("/inward", inwardCrudRouter);
 const outwardCrudRouter = Router();
-createCrudRoutes(outwardCrudRouter, Outward, "outward", "id", void 0, "OUTWARD");
+createCrudRoutes(outwardCrudRouter, Outward, "outward", "id", void 0, "OUTWARD", { softDelete: true });
 router.use("/outward", outwardCrudRouter);
 const inwardReturnCrudRouter = Router();
-createCrudRoutes(inwardReturnCrudRouter, InwardReturn, "inward-returns", "id", void 0, "INWARD_RETURN");
+createCrudRoutes(inwardReturnCrudRouter, InwardReturn, "inward-returns", "id", void 0, "INWARD_RETURN", { softDelete: true });
 router.use("/inward-returns", inwardReturnCrudRouter);
 const outwardReturnCrudRouter = Router();
-createCrudRoutes(outwardReturnCrudRouter, OutwardReturn, "outward-returns", "id", void 0, "OUTWARD_RETURN");
+createCrudRoutes(outwardReturnCrudRouter, OutwardReturn, "outward-returns", "id", void 0, "OUTWARD_RETURN", { softDelete: true });
 router.use("/outward-returns", outwardReturnCrudRouter);
 // Custom DELETE for MRAllocation — reverses inventory + MR item allocatedQty
 router.delete("/mr-allocations/:id", authenticate, async (req, res) => {

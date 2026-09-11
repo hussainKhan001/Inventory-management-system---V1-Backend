@@ -10,7 +10,11 @@ const router = Router();
 
 // GET / and GET /:id use the generic CRUD router
 const crudRouter = Router();
-createCrudRoutes(crudRouter, WriteOff, "writeoffs", "id", void 0, "WRITEOFF");
+// overrideBasePerm "WRITE_OFF" matches the app's established permission naming
+// (VIEW_WRITE_OFFS/CREATE_WRITE_OFF/EDIT_WRITE_OFF/DELETE_WRITE_OFF/APPROVE_WRITE_OFF) —
+// without it, the default derivation from "writeoffs" would produce "WRITEOFF" (no
+// underscore), which no role's permission list actually contains.
+createCrudRoutes(crudRouter, WriteOff, "writeoffs", "id", "WRITE_OFF", "WRITEOFF", { softDelete: true });
 
 // Mount only GET routes from crudRouter; POST and DELETE come from crudRouter too.
 // We override PUT here to handle inventory on approval.
@@ -18,6 +22,8 @@ router.get("/", (req, res, next) => crudRouter.handle(req, res, next));
 router.get("/:id", (req, res, next) => crudRouter.handle(req, res, next));
 router.post("/", (req, res, next) => crudRouter.handle(req, res, next));
 router.delete("/:id", (req, res, next) => crudRouter.handle(req, res, next));
+router.post("/:id/restore", (req, res, next) => crudRouter.handle(req, res, next));
+router.delete("/:id/permanent", (req, res, next) => crudRouter.handle(req, res, next));
 
 router.put("/:id", authenticate, async (req, res) => {
   try {

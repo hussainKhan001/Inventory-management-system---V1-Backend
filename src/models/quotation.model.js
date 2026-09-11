@@ -42,6 +42,10 @@ const QuotationSchema = new Schema({
   date: { type: String, default: () => new Date().toISOString().split("T")[0] },
   linkedPoId:       String,
   linkedMasterPoId: String,
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 QuotationSchema.pre("save", async function () {

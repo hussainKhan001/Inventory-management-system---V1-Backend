@@ -45,6 +45,10 @@ const MaterialRequirementSchema = new Schema({
     remark: String,
   }],
   quotationLinkActive: { type: Boolean, default: true },
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 MaterialRequirementSchema.index({ project: 1 });

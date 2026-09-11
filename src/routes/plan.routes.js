@@ -170,6 +170,6 @@ router.post("/:id/reject", authenticate, async (req, res) => {
 
 // Standard CRUD: GET /, GET /:id, PUT /:id, DELETE /:id
 // POST / is already handled above — Express uses the first registered handler
-createCrudRoutes(router, MaterialPlan, "planning", "id", "MATERIAL_PLAN", "PLANNING");
+createCrudRoutes(router, MaterialPlan, "planning", "id", "MATERIAL_PLAN", "PLANNING", { softDelete: true });
 
 export default router;

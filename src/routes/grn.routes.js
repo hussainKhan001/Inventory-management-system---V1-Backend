@@ -79,6 +79,15 @@ router.get("/", authenticate, async (req, res) => {
     if (req.query.showMerged !== "1") {
       query.isActive = { $ne: false };
     }
+    // Recycle bin: ?deleted=true lists only soft-deleted GRNs; otherwise they're hidden
+    if (req.query.deleted === "true") {
+      if (!await serverHasPermission(req.user, "VIEW_RECYCLE_BIN_GRN")) {
+        return res.status(403).json({ success: false, message: "Forbidden" });
+      }
+      query.isDeleted = true;
+    } else {
+      query.isDeleted = { $ne: true };
+    }
     // slim=1 excludes photo arrays — reduces payload ~70% for list/tracker views
     const slimProjection = req.query.slim === "1" ? {
       challanPhotos: 0,
@@ -129,6 +138,7 @@ router.post("/", authenticate, async (req, res) => {
       const existingActiveGRN = await GRN.findOne({
         poId: rawGrnData.poId,
         isActive: { $ne: false },
+        isDeleted: { $ne: true },
         status: { $nin: ["Merged", "Partial", "Over-Received"] }
       }, { id: 1, status: 1 }).lean();
       if (existingActiveGRN) {
@@ -301,7 +311,7 @@ router.post("/", authenticate, async (req, res) => {
     if (grnData.poId) {
       const po = await PurchaseOrder.findOne({ id: grnData.poId });
       if (po) {
-        const allGrns = await GRN.find({ poId: grnData.poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
+        const allGrns = await GRN.find({ poId: grnData.poId, status: { $ne: "Merged" }, isActive: { $ne: false }, isDeleted: { $ne: true } });
         let allFulfilled = true;
         let anyOverReceived = false;
         let anyReceived1 = false;
@@ -506,7 +516,7 @@ router.put("/:id", authenticate, async (req, res) => {
     if (poId) {
       const po = await PurchaseOrder.findOne({ id: poId });
       if (po) {
-        const allGrns = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
+        const allGrns = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false }, isDeleted: { $ne: true } });
         const updatedGrnsList = allGrns.map((g) => g.id === req.params.id ? grn : g);
         let allFulfilled = true;
         let anyOverReceived = false;
@@ -613,7 +623,7 @@ router.post("/:id/receipt", authenticate, async (req, res) => {
     if (grn.poId) {
       const po = await PurchaseOrder.findOne({ id: grn.poId });
       if (po) {
-        const allGrns = await GRN.find({ poId: grn.poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
+        const allGrns = await GRN.find({ poId: grn.poId, status: { $ne: "Merged" }, isActive: { $ne: false }, isDeleted: { $ne: true } });
         let allFulfilled = true;
         let anyOverReceived = false;
         let anyReceived3 = false;
@@ -722,7 +732,7 @@ router.put("/:id/receipt/:idx", authenticate, async (req, res) => {
       if (grn.poId) {
         const po = await PurchaseOrder.findOne({ id: grn.poId });
         if (po) {
-          const allGrns = await GRN.find({ poId: grn.poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
+          const allGrns = await GRN.find({ poId: grn.poId, status: { $ne: "Merged" }, isActive: { $ne: false }, isDeleted: { $ne: true } });
           let allFulfilled = true;
           let anyOverReceived = false;
           let anyReceived4 = false;
@@ -760,6 +770,37 @@ router.put("/:id/receipt/:idx", authenticate, async (req, res) => {
     res.status(400).json({ success: false, message: error.message });
   }
 });
+// Recompute a PO's GRN status from its currently non-deleted, non-merged GRNs — shared by
+// both GRN delete and GRN restore so the two stay consistent.
+async function recomputeGrnPoStatus(poId) {
+  if (!poId) return;
+  const po = await PurchaseOrder.findOne({ id: poId });
+  if (!po) return;
+  const remainingGrns = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false }, isDeleted: { $ne: true } });
+  let allFulfilled = true;
+  let anyVariance = false;
+  let hasAnyReceipt = remainingGrns.length > 0;
+  for (const poItem of po.items) {
+    const totalReceived = remainingGrns.reduce((sum, g) => {
+      const grnItem = g.items.find((i) => i.sku === poItem.sku);
+      return sum + (grnItem?.received || 0);
+    }, 0);
+    if (totalReceived < (poItem.qty || 0)) {
+      allFulfilled = false;
+      if (totalReceived > 0) anyVariance = true;
+    } else if (totalReceived > (poItem.qty || 0)) {
+      anyVariance = true;
+    }
+  }
+  const newStatus = allFulfilled && hasAnyReceipt ? "GRN Fulfilled" : anyVariance ? "GRN Variance" : "GRN Pending";
+  if (po.status !== newStatus) {
+    po.status = newStatus;
+    await po.save({});
+    broadcast({ type: "DATA_UPDATED", path: "pos" });
+  }
+}
+__name(recomputeGrnPoStatus, "recomputeGrnPoStatus");
+
 router.delete("/:id", authenticate, async (req, res) => {
   try {
     if (!await serverHasPermission(req.user, "DELETE_GRN")) {
@@ -767,15 +808,21 @@ router.delete("/:id", authenticate, async (req, res) => {
     }
     const grn = await GRN.findOne({ id: req.params.id });
     if (!grn) throw new Error("GRN not found");
+    if (grn.isDeleted) return res.status(400).json({ success: false, message: "Already in the recycle bin" });
     const poId = grn.poId;
     const grnStore = grn.store;
     // C4: Reverse both liveStock AND locationStock/sites[] when deleting GRN
+    const deletionReversal = {};
     for (const item of grn.items) {
       const inv = await Inventory.findOne({ sku: item.sku });
       if (inv) {
         const qty = item.received || 0;
         if (!inv.locationStock) inv.locationStock = new Map();
         if (!inv.sites) inv.sites = [];
+        // Record the amount actually reversed (clamped) so restore can mirror it
+        // exactly, instead of blindly re-adding `qty` and inflating stock.
+        const actualLiveReversal = Math.min(qty, inv.liveStock || 0);
+        deletionReversal[item.sku] = actualLiveReversal;
         inv.liveStock = Math.max(0, (inv.liveStock || 0) - qty);
         if (grnStore) {
           const curr = inv.locationStock.has(grnStore) ? Number(inv.locationStock.get(grnStore)) : (inv.sites.find(s => s.siteName === grnStore)?.liveStock || 0);
@@ -787,38 +834,18 @@ router.delete("/:id", authenticate, async (req, res) => {
           inv.markModified("sites");
         }
         await inv.save({});
+      } else {
+        deletionReversal[item.sku] = 0;
       }
     }
-    await GRN.findOneAndDelete({ id: req.params.id });
-    await Inward.deleteMany({ grnRef: req.params.id });
-    await Transaction.deleteMany({ linkId: req.params.id });
-    if (poId) {
-      const po = await PurchaseOrder.findOne({ id: poId });
-      if (po) {
-        const remainingGrns = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
-        let allFulfilled = true;
-        let anyVariance = false;
-        let hasAnyReceipt = remainingGrns.length > 0;
-        for (const poItem of po.items) {
-          const totalReceived = remainingGrns.reduce((sum, g) => {
-            const grnItem = g.items.find((i) => i.sku === poItem.sku);
-            return sum + (grnItem?.received || 0);
-          }, 0);
-          if (totalReceived < (poItem.qty || 0)) {
-            allFulfilled = false;
-            if (totalReceived > 0) anyVariance = true;
-          } else if (totalReceived > (poItem.qty || 0)) {
-            anyVariance = true;
-          }
-        }
-        let newStatus = allFulfilled && hasAnyReceipt ? "GRN Fulfilled" : anyVariance ? "GRN Variance" : "GRN Pending";
-        if (po.status !== newStatus) {
-          po.status = newStatus;
-          await po.save({});
-          broadcast({ type: "DATA_UPDATED", path: "pos" });
-        }
-      }
-    }
+    grn.isDeleted = true;
+    grn.deletedAt = new Date();
+    grn.deletedBy = req.user.name;
+    grn.deletionReversal = deletionReversal;
+    await grn.save({ validateModifiedOnly: true });
+    await Inward.updateMany({ grnRef: req.params.id }, { isDeleted: true, deletedAt: new Date(), deletedBy: req.user.name });
+    await Transaction.updateMany({ linkId: req.params.id }, { isDeleted: true, deletedAt: new Date(), deletedBy: req.user.name });
+    await recomputeGrnPoStatus(poId);
     broadcast({ type: "DATA_UPDATED", path: "grn" });
     broadcast({ type: "DATA_UPDATED", path: "inward" });
     broadcast({ type: "DATA_UPDATED", path: "inventory" });
@@ -829,6 +856,76 @@ router.delete("/:id", authenticate, async (req, res) => {
       deletedBy: req.user.name,
       itemSkus: grn.items.map((i) => i.sku)
     });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+// Recycle bin: restore re-applies the GRN's stock effect (reverse of the delete-time math)
+router.post("/:id/restore", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "RESTORE_GRN")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "Not found" });
+    if (!grn.isDeleted) return res.status(400).json({ success: false, message: "Item is not in the recycle bin" });
+    const poId = grn.poId;
+    const grnStore = grn.store;
+    // Mirror exactly what delete actually reversed (may be less than received
+    // qty if it was clamped) so restore can't inflate stock beyond delete's effect.
+    const deletionReversal = grn.deletionReversal || new Map();
+    for (const item of grn.items) {
+      const inv = await Inventory.findOne({ sku: item.sku });
+      if (inv) {
+        const qty = deletionReversal instanceof Map
+          ? (deletionReversal.get(item.sku) ?? (item.received || 0))
+          : (deletionReversal[item.sku] ?? (item.received || 0));
+        if (!inv.locationStock) inv.locationStock = new Map();
+        if (!inv.sites) inv.sites = [];
+        inv.liveStock = (inv.liveStock || 0) + qty;
+        if (grnStore) {
+          const curr = inv.locationStock.has(grnStore) ? Number(inv.locationStock.get(grnStore)) : (inv.sites.find(s => s.siteName === grnStore)?.liveStock || 0);
+          const newQty = curr + qty;
+          inv.locationStock.set(grnStore, newQty);
+          inv.markModified("locationStock");
+          const se = inv.sites.find(s => s.siteName === grnStore);
+          if (se) { se.liveStock = newQty; } else { inv.sites.push({ siteName: grnStore, siteCode: "", openingStock: 0, liveStock: newQty }); }
+          inv.markModified("sites");
+        }
+        await inv.save({});
+      }
+    }
+    grn.isDeleted = false;
+    grn.deletedAt = undefined;
+    grn.deletedBy = undefined;
+    grn.deletionReversal = undefined;
+    await grn.save({ validateModifiedOnly: true });
+    await Inward.updateMany({ grnRef: req.params.id }, { isDeleted: false, $unset: { deletedAt: "", deletedBy: "" } });
+    await Transaction.updateMany({ linkId: req.params.id }, { isDeleted: false, $unset: { deletedAt: "", deletedBy: "" } });
+    await recomputeGrnPoStatus(poId);
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
+    broadcast({ type: "DATA_UPDATED", path: "inward" });
+    broadcast({ type: "DATA_UPDATED", path: "inventory" });
+    broadcast({ type: "DATA_UPDATED", path: "transactions" });
+    res.json({ success: true, data: grn });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+router.delete("/:id/permanent", authenticate, async (req, res) => {
+  try {
+    const roleLower = (req.user.role || "").toLowerCase().trim();
+    if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
+      return res.status(403).json({ success: false, message: "Only Super Admin can permanently delete." });
+    }
+    const grn = await GRN.findOne({ id: req.params.id });
+    if (!grn) return res.status(404).json({ success: false, message: "Not found" });
+    if (!grn.isDeleted) return res.status(400).json({ success: false, message: "Item must be in the recycle bin first." });
+    await GRN.findOneAndDelete({ id: req.params.id });
+    await Inward.deleteMany({ grnRef: req.params.id });
+    await Transaction.deleteMany({ linkId: req.params.id });
+    broadcast({ type: "DATA_UPDATED", path: "grn" });
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -853,8 +950,8 @@ router.post("/:id/merge", authenticate, async (req, res) => {
 
     const target = await GRN.findOne({ id: targetId });
     if (!target) return res.status(404).json({ success: false, message: `Target GRN ${targetId} not found` });
-    if (!target.isActive || target.status === "Merged") {
-      return res.status(400).json({ success: false, message: `Target GRN ${targetId} is already merged — cannot use it as a merge target` });
+    if (!target.isActive || target.status === "Merged" || target.isDeleted) {
+      return res.status(400).json({ success: false, message: `Target GRN ${targetId} is already merged or deleted — cannot use it as a merge target` });
     }
 
     const sources = await GRN.find({ id: { $in: sourceIds } });
@@ -864,8 +961,8 @@ router.post("/:id/merge", authenticate, async (req, res) => {
       return res.status(404).json({ success: false, message: `Source GRNs not found: ${missing.join(", ")}` });
     }
     for (const src of sources) {
-      if (!src.isActive || src.status === "Merged") {
-        return res.status(400).json({ success: false, message: `GRN ${src.id} is already merged — cannot merge it again` });
+      if (!src.isActive || src.status === "Merged" || src.isDeleted) {
+        return res.status(400).json({ success: false, message: `GRN ${src.id} is already merged or deleted — cannot merge it again` });
       }
       if (target.poId && src.poId !== target.poId) {
         return res.status(400).json({ success: false, message: `GRN ${src.id} belongs to PO ${src.poId}, but target belongs to PO ${target.poId}. Cannot merge across POs.` });
@@ -978,7 +1075,7 @@ router.post("/migrate-status", authenticate, async (req, res) => {
     if (!["super admin", "superadmin", "admin"].includes(roleLower)) {
       return res.status(403).json({ success: false, message: "Super Admin only" });
     }
-    const grns = await GRN.find({ status: { $ne: "Merged" }, isActive: { $ne: false } }, { id: 1, poId: 1, items: 1, status: 1 }).lean();
+    const grns = await GRN.find({ status: { $ne: "Merged" }, isActive: { $ne: false }, isDeleted: { $ne: true } }, { id: 1, poId: 1, items: 1, status: 1 }).lean();
     let updated = 0;
     for (const grn of grns) {
       let anyShort = false, anyOver = false;
@@ -1051,7 +1148,7 @@ router.post("/renumber", authenticate, async (req, res) => {
 // ─── Helper: compute PO payment status from ALL GRNs + ALL receipt batches ───
 async function updatePOPaymentStatus(poId) {
   if (!poId) return;
-  const allPOGRNs = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false } });
+  const allPOGRNs = await GRN.find({ poId, status: { $ne: "Merged" }, isActive: { $ne: false }, isDeleted: { $ne: true } });
   let allPaid = allPOGRNs.length > 0;
   let somePaid = false;
   let totalPaid = 0;

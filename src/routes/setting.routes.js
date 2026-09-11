@@ -40,7 +40,7 @@ router.get("/stats", authenticate, async (req, res) => {
       Inventory.aggregate([{ $group: { _id: null, total: { $sum: { $ifNull: ["$issuedQty", 0] } } } }]).then((res2) => res2[0]?.total || 0),
       Inventory.countDocuments({ condition: { $in: ["Good", "Needs Repair", "GOOD", "NEEDS REPAIR"] } }).lean(),
       PurchaseOrder.aggregate([
-        { $match: { status: { $in: ["Pending", "Pending L1", "Pending L2", "Pending L3"] } } },
+        { $match: { status: { $in: ["Pending", "Pending L1", "Pending L2", "Pending L3"] }, isDeleted: { $ne: true } } },
         { $group: { _id: null, total: { $sum: "$totalValue" } } }
       ]).then((res2) => res2[0]?.total || 0),
       Inventory.aggregate([
@@ -57,7 +57,7 @@ router.get("/stats", authenticate, async (req, res) => {
         ] } },
         { $count: "count" }
       ]).then((res2) => res2[0]?.count || 0),
-      WriteOff.countDocuments({ status: "Pending" }).lean(),
+      WriteOff.countDocuments({ status: "Pending", isDeleted: { $ne: true } }).lean(),
       Inventory.countDocuments({
         $or: [
           { availableQty: 0 },
@@ -83,7 +83,8 @@ router.get("/stats", authenticate, async (req, res) => {
         {
           $match: {
             date: (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
-            type: { $in: ["Inward", "Inward Return", "Public Inward", "Public Inward Return", "Transfer Inward", "Public Transfer Inward", "GRN"] }
+            type: { $in: ["Inward", "Inward Return", "Public Inward", "Public Inward Return", "Transfer Inward", "Public Transfer Inward", "GRN"] },
+            isDeleted: { $ne: true }
           }
         },
         { $unwind: "$items" },
@@ -93,18 +94,20 @@ router.get("/stats", authenticate, async (req, res) => {
         {
           $match: {
             date: (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
-            type: { $in: ["Outward", "Outward Return", "Public Outward", "Public Outward Return", "Transfer Outward", "Public Transfer Outward"] }
+            type: { $in: ["Outward", "Outward Return", "Public Outward", "Public Outward Return", "Transfer Outward", "Public Transfer Outward"] },
+            isDeleted: { $ne: true }
           }
         },
         { $unwind: "$items" },
         { $group: { _id: null, total: { $sum: "$items.qty" } } }
       ]).then((res2) => res2[0]?.total || 0),
       MaterialRequirement.aggregate([
+        { $match: { isDeleted: { $ne: true } } },
         { $group: { _id: "$status", count: { $sum: 1 } } }
       ]).then(rows => Object.fromEntries(rows.map(r => [r._id, r.count]))),
-      Quotation.countDocuments({ status: "Pending" }).lean(),
-      PurchaseOrder.countDocuments({ status: { $in: ["Pending", "Pending L1", "Pending L2", "Pending L3"] } }).lean(),
-      PurchaseOrder.countDocuments({ status: { $in: ["GRN Pending", "GRN Variance"] } }).lean(),
+      Quotation.countDocuments({ status: "Pending", isDeleted: { $ne: true } }).lean(),
+      PurchaseOrder.countDocuments({ status: { $in: ["Pending", "Pending L1", "Pending L2", "Pending L3"] }, isDeleted: { $ne: true } }).lean(),
+      PurchaseOrder.countDocuments({ status: { $in: ["GRN Pending", "GRN Variance"] }, isDeleted: { $ne: true } }).lean(),
       MRAllocation.countDocuments({ $expr: { $lt: ["$issuedQty", "$allocatedQty"] } }).lean()
     ]);
     const statsData = {

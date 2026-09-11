@@ -7,7 +7,7 @@ const CLOSED_STATUSES = ["PO Closed", "Cancelled", "Blocked"];
 /** Sum GRN.items[].received for a given PO + SKU across all active, non-merged GRNs. */
 async function getReceivedQty(poId, sku) {
   const grns = await GRN.find(
-    { poId, status: { $ne: "Merged" }, isActive: { $ne: false } },
+    { poId, status: { $ne: "Merged" }, isActive: { $ne: false }, isDeleted: { $ne: true } },
     { items: 1 }
   ).lean();
   return grns.reduce((sum, g) => {
@@ -27,7 +27,7 @@ async function getReceivedQty(poId, sku) {
  *   (deliveryDetails.location) — stock arriving at a different store doesn't cover this one.
  */
 export async function getQtyAlreadyOnOrder(sku, store) {
-  const filter = { "items.sku": sku, status: { $nin: CLOSED_STATUSES } };
+  const filter = { "items.sku": sku, status: { $nin: CLOSED_STATUSES }, isDeleted: { $ne: true } };
   if (store) filter["deliveryDetails.location"] = store;
 
   const openPOs = await PurchaseOrder.find(filter, { id: 1, items: 1 }).lean();
@@ -49,7 +49,7 @@ export async function getQtyAlreadyOnOrder(sku, store) {
  *   stores can each have their own pending auto-PO without blocking one another.
  */
 export async function hasOpenAutoReorderPO(sku, store) {
-  const filter = { "items.sku": sku, source: "Auto-Reorder", status: { $nin: CLOSED_STATUSES } };
+  const filter = { "items.sku": sku, source: "Auto-Reorder", status: { $nin: CLOSED_STATUSES }, isDeleted: { $ne: true } };
   if (store) filter["deliveryDetails.location"] = store;
 
   const existing = await PurchaseOrder.findOne(filter, { _id: 1 }).lean();

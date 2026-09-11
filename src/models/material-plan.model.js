@@ -53,6 +53,10 @@ const MaterialPlanSchema = new Schema({
   items:       [PlanLineItemSchema],
   floors:      [MPFloorSchema],  // used when planType === "MP"
   editHistory: [{ date: Date, editedBy: String, previousItems: [PlanLineItemSchema] }],
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 MaterialPlanSchema.index({ project: 1 });

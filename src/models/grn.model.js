@@ -122,6 +122,15 @@ const GRNSchema = new Schema({
   // Merge tracking — set when this GRN is folded into another
   mergedInto:         { type: String, default: null },
   isActive:           { type: Boolean, default: true },
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
+  // Per-SKU qty actually reversed from stock on delete (may be less than the
+  // received qty if other stock movement already consumed it) — restore
+  // re-applies exactly this amount instead of blindly re-adding received qty,
+  // so a clamp during delete can't cause restore to inflate stock.
+  deletionReversal: { type: Map, of: Number },
 }, { timestamps: true });
 
 GRNSchema.index({ poId: 1 });

@@ -228,6 +228,6 @@ router.put("/:id/cancel", authenticate, async (req, res) => {
   }
 });
 
-createCrudRoutes(router, MasterPO, "master-pos", "id", "MASTER_PO", "MASTER_PO");
+createCrudRoutes(router, MasterPO, "master-pos", "id", "MASTER_PO", "MASTER_PO", { softDelete: true });
 
 export default router;

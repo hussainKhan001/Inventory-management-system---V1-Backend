@@ -11,6 +11,10 @@ const CatalogueSchema = new Schema({
   minStock:    { type: Number, default: 0 },
   imageUrl:    String,
   status:      { type: String, enum: ["Draft","Approved"], default: "Draft" },
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 CatalogueSchema.index({ itemName: 1 });

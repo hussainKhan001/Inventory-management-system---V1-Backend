@@ -47,25 +47,54 @@ export async function checkAutoReorder(skus, store) {
   }
 }
 
+// Concurrent Outward requests for the same SKU+store can both pass the
+// hasOpenAutoReorderPO check before either PO is committed, creating duplicates.
+// Claim a short-lived, DB-atomic lock per (sku, store) first — findOneAndUpdate's
+// filter only matches an unlocked/expired lock, so only one concurrent caller wins.
+async function acquireReorderLock(sku, store) {
+  const lockField = `_reorderLocks.${store || "_default"}`;
+  const now = new Date();
+  const lockExpiry = new Date(now.getTime() + 20_000); // auto-expires so a crash can't wedge it
+  const claimed = await ReorderRule.findOneAndUpdate(
+    {
+      sku,
+      isActive: true,
+      $or: [{ [lockField]: { $exists: false } }, { [lockField]: { $lt: now } }],
+    },
+    { $set: { [lockField]: lockExpiry } },
+    { new: true }
+  ).lean();
+  return claimed; // null if no active rule or another caller already holds the lock
+}
+
+async function releaseReorderLock(sku, store) {
+  const lockField = `_reorderLocks.${store || "_default"}`;
+  await ReorderRule.updateOne({ sku }, { $unset: { [lockField]: "" } }).catch(() => {});
+}
+
 async function checkAutoReorderForSku(sku, store) {
-  const rule = await ReorderRule.findOne({ sku, isActive: true }).lean();
-  if (!rule) return;
+  const rule = await acquireReorderLock(sku, store);
+  if (!rule) return; // no active rule, or another concurrent check already owns this sku+store
 
-  const inv = await Inventory.findOne({ sku }, { liveStock: 1, sites: 1, locationStock: 1 }).lean();
-  if (!inv) return;
-  // Store-wise: check that store's own stock, not the site-wide total — a healthy total can
-  // still mask one starving store. Falls back to the aggregate when no store is known (e.g. a
-  // non-store-scoped manual outward).
-  const currentStock = store ? getSiteStock(inv, store) : (inv.liveStock || 0);
+  try {
+    const inv = await Inventory.findOne({ sku }, { liveStock: 1, sites: 1, locationStock: 1 }).lean();
+    if (!inv) return;
+    // Store-wise: check that store's own stock, not the site-wide total — a healthy total can
+    // still mask one starving store. Falls back to the aggregate when no store is known (e.g. a
+    // non-store-scoped manual outward).
+    const currentStock = store ? getSiteStock(inv, store) : (inv.liveStock || 0);
 
-  // Safeguard against duplicate/over-ordering — reused everywhere this decision is made,
-  // scoped to the same store so stock already inbound to a different store doesn't count here.
-  const qtyAlreadyOnOrder = await getQtyAlreadyOnOrder(sku, store);
-  if (currentStock + qtyAlreadyOnOrder > rule.thresholdQty) return; // still above the reorder point
+    // Safeguard against duplicate/over-ordering — reused everywhere this decision is made,
+    // scoped to the same store so stock already inbound to a different store doesn't count here.
+    const qtyAlreadyOnOrder = await getQtyAlreadyOnOrder(sku, store);
+    if (currentStock + qtyAlreadyOnOrder > rule.thresholdQty) return; // still above the reorder point
 
-  if (await hasOpenAutoReorderPO(sku, store)) return; // one's already in the pipeline for this store
+    if (await hasOpenAutoReorderPO(sku, store)) return; // one's already in the pipeline for this store
 
-  await createAutoReorderPO(rule, currentStock, store);
+    await createAutoReorderPO(rule, currentStock, store);
+  } finally {
+    await releaseReorderLock(sku, store);
+  }
 }
 
 async function createAutoReorderPO(rule, currentStock, store) {

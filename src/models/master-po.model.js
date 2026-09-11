@@ -62,6 +62,10 @@ const MasterPOSchema = new Schema({
   terms:               String,
   deliveryAddress:     String,
   expectedDeliveryDate: String,
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 MasterPOSchema.index({ planId: 1 });

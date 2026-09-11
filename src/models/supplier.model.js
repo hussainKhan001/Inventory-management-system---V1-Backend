@@ -35,6 +35,10 @@ const SupplierSchema = new Schema({
   category:     { type: String, required: true },   // = dealingProducts
   gst:          { type: String },                   // = gstNumber
   accountNo:    { type: String },                   // = accountNumber
+  // Recycle bin
+  isDeleted:  { type: Boolean, default: false },
+  deletedAt:  Date,
+  deletedBy:  String,
 }, { timestamps: true });
 
 // Keep all alias fields in sync with their canonical counterparts on every save

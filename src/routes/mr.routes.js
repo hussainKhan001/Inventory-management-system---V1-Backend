@@ -108,6 +108,15 @@ router.get("/", authenticate, async (req, res) => {
       }
       query = { ...query, ...restFilter };
     }
+    // Recycle bin: ?deleted=true lists only soft-deleted MRs; otherwise they're hidden
+    if (req.query.deleted === "true") {
+      if (!await serverHasPermission(req.user, "VIEW_RECYCLE_BIN_MATERIAL_REQUIREMENT")) {
+        return res.status(403).json({ success: false, message: "Forbidden" });
+      }
+      query.isDeleted = true;
+    } else {
+      query.isDeleted = { $ne: true };
+    }
     const [items, total] = await Promise.all([
       MaterialRequirement.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
       MaterialRequirement.countDocuments(query).lean()
@@ -542,7 +551,7 @@ router.post("/:id/extra-reject", authenticate, async (req, res) => {
   }
 });
 
-createCrudRoutes(router, MaterialRequirement, "material-requirements", "id", "MATERIAL_REQUIREMENT", "MR");
+createCrudRoutes(router, MaterialRequirement, "material-requirements", "id", "MATERIAL_REQUIREMENT", "MR", { softDelete: true });
 var stdin_default = router;
 export {
   stdin_default as default
