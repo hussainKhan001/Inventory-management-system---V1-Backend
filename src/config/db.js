@@ -160,6 +160,7 @@ async function connectDB() {
         "REJECT_BILL",
         "MAKE_PAYMENT",
         "VIEW_PAYMENTS",
+        "VIEW_ACCOUNTS_PAYMENT_HISTORY",
         "VIEW_ARCHIVE",
         "RESTORE_ARCHIVE",
         // Recycle bin — view + restore, split from DELETE, per module

@@ -17,6 +17,11 @@ import { broadcast } from "../utils/broadcaster.js";
 import { getNextSequence } from "../utils/sequence.js";
 import { createCrudRoutes } from "../utils/crud.js";
 import { logAudit } from "../utils/audit.js";
+import { ensureAccountEntry } from "../utils/accountEntry.js";
+
+// PO statuses that make it eligible for the Accounts module — mirrors the
+// $in list scripts/migrate-accounts.js and the frontend AccountsPage both use.
+const ACCOUNTS_ENTRY_STATUSES = ["GRN Fulfilled", "GRN Variance", "Ready for Payment", "PO Closed"];
 
 const pdfUpload = multer({
   storage: multer.memoryStorage(),
@@ -274,6 +279,7 @@ router.post("/:id/close", authenticate, async (req, res) => {
       { returnDocument: "after" }
     ).lean();
     if (!po) return res.status(404).json({ success: false, message: "PO not found" });
+    await ensureAccountEntry(po);
     broadcast({ type: "DATA_UPDATED", path: "pos" });
     res.json({ success: true, data: po });
   } catch (error) {
@@ -288,6 +294,7 @@ router.post("/:id/reopen", authenticate, async (req, res) => {
       { returnDocument: "after" }
     ).lean();
     if (!po) return res.status(404).json({ success: false, message: "PO not found or not in Closed status" });
+    await ensureAccountEntry(po);
     broadcast({ type: "DATA_UPDATED", path: "pos" });
     res.json({ success: true, data: po });
   } catch (error) {
@@ -408,6 +415,7 @@ router.put("/:id/submit-revision", authenticate, async (req, res) => {
     po.set(updatableFields);
     await po.save({ validateModifiedOnly: true });
     // GRNs stay bill_rejected — accounts team must explicitly approve via approve-revision
+    await ensureAccountEntry(po);
 
     logAudit(req.user, "UPDATE", "PurchaseOrder", po.id, { action: "revision_submitted" });
     broadcast({ type: "DATA_UPDATED", path: "pos" });

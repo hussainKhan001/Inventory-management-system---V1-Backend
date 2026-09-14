@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { AccountEntry, PurchaseOrder } from "../models/index.js";
-import { authenticate } from "../middleware/auth.middleware.js";
+import { authenticate, serverHasPermission } from "../middleware/auth.middleware.js";
 import { broadcast } from "../utils/broadcaster.js";
 import { logAudit } from "../utils/audit.js";
 import { getNextSequence } from "../utils/sequence.js";
@@ -74,6 +74,75 @@ router.get("/by-po/:poId", authenticate, async (req, res) => {
   try {
     const doc = await AccountEntry.findOne({ poId: req.params.poId }).lean();
     res.json({ success: true, data: doc || null });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── GET /api/accounts/payment-history — flattened cross-PO payment log ──────
+// Every AccountEntry's paymentHistory[] entries, flattened with poId/supplier/
+// project context, filterable by supplier, PO, date range, and free-text search.
+// Registered before "/:id" so it isn't shadowed by that catch-all param route.
+router.get("/payment-history", authenticate, async (req, res) => {
+  try {
+    if (!await serverHasPermission(req.user, "VIEW_ACCOUNTS_PAYMENT_HISTORY")) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    const { supplier, poId, start, end, search } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(parseInt(req.query.limit) || 50, 500);
+
+    const query = { "paymentHistory.0": { $exists: true } };
+    if (poId) query.poId = poId;
+    if (supplier) query.supplier = supplier;
+
+    const docs = await AccountEntry.find(query, {
+      id: 1, poId: 1, supplier: 1, project: 1, paymentHistory: 1,
+    }).lean();
+
+    let rows = [];
+    for (const acc of docs) {
+      for (const p of acc.paymentHistory || []) {
+        rows.push({
+          accountId: acc.id,
+          poId: acc.poId,
+          supplier: acc.supplier,
+          project: acc.project,
+          installmentNo: p.installmentNo,
+          date: p.date,
+          amountPaid: p.amountPaid,
+          mode: p.mode,
+          ref: p.ref,
+          utr: p.utr,
+          chequeNo: p.chequeNo,
+          chequeDate: p.chequeDate,
+          bank: p.bank,
+          paidBy: p.paidBy,
+          fromCompany: p.fromCompany,
+          toCompany: p.toCompany,
+          remarks: p.remarks,
+          grnId: p.grnId,
+        });
+      }
+    }
+
+    if (start) rows = rows.filter((r) => r.date && r.date >= start);
+    if (end)   rows = rows.filter((r) => r.date && r.date <= end);
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      rows = rows.filter((r) =>
+        re.test(r.poId || "") || re.test(r.supplier || "") || re.test(r.utr || "") ||
+        re.test(r.chequeNo || "") || re.test(r.ref || "") || re.test(r.paidBy || "")
+      );
+    }
+
+    rows.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+    const total = rows.length;
+    const skip = (page - 1) * limit;
+    const paged = rows.slice(skip, skip + limit);
+
+    res.json({ success: true, data: paged, total, page, limit });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

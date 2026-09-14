@@ -34,7 +34,11 @@ const AccountSchema = new Schema({
 
   accountStatus: {
     type: String,
-    enum: ["bill_verify", "payment_pending", "partial_paid", "paid", "rejected"],
+    // Must mirror every value PurchaseOrder.accountStatus actually takes across the app
+    // (bill-verify/approve, payment initiate/pending/physical-check, paid, rejected) —
+    // this enum being narrower than reality silently blocked AccountEntry creation for
+    // POs already past "bill_verify" until this fix.
+    enum: ["bill_verify", "bill_verified", "bill_approved", "payment_pending", "physical_check", "payment_initiated", "partial_paid", "paid", "rejected"],
     default: "bill_verify",
   },
 

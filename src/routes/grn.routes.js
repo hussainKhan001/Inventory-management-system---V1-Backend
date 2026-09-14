@@ -9,6 +9,7 @@ import { triggerN8nWebhook, checkAndFireLowStockWebhook } from "../utils/webhook
 import { broadcast } from "../utils/broadcaster.js";
 import { logAudit } from "../utils/audit.js";
 import { getNextSequence } from "../utils/sequence.js";
+import { ensureAccountEntry } from "../utils/accountEntry.js";
 
 // Sanitize filter to prevent MongoDB operator injection — allow only safe value types
 function sanitizeFilter(raw) {
@@ -24,6 +25,11 @@ function sanitizeFilter(raw) {
   }
   return safe;
 }
+// PO statuses that make it eligible for the Accounts module — mirrors the
+// $in list scripts/migrate-accounts.js and the frontend AccountsPage both
+// use to decide which POs belong there.
+const ACCOUNTS_ENTRY_STATUSES = ["GRN Fulfilled", "GRN Variance", "Ready for Payment", "PO Closed"];
+
 const router = Router();
 router.get("/", authenticate, async (req, res) => {
   try {
@@ -334,6 +340,7 @@ router.post("/", authenticate, async (req, res) => {
           po.status = newStatus;
           await po.save({});
         }
+        if (ACCOUNTS_ENTRY_STATUSES.includes(newStatus)) await ensureAccountEntry(po);
         if (allFulfilled) {
           const accountRoles = await getRolesWithPermission("REVIEW_PO_BILL");
           await createNotification({
@@ -539,6 +546,7 @@ router.put("/:id", authenticate, async (req, res) => {
           await po.save({});
           broadcast({ type: "DATA_UPDATED", path: "pos" });
         }
+        if (ACCOUNTS_ENTRY_STATUSES.includes(newStatus)) await ensureAccountEntry(po);
       }
     }
     broadcast({ type: "DATA_UPDATED", path: "grn" });
@@ -645,6 +653,7 @@ router.post("/:id/receipt", authenticate, async (req, res) => {
           await po.save();
           broadcast({ type: "DATA_UPDATED", path: "pos" });
         }
+        if (ACCOUNTS_ENTRY_STATUSES.includes(newPoStatus)) await ensureAccountEntry(po);
         _receiptNewPoStatus = newPoStatus;
       }
     }
@@ -755,6 +764,7 @@ router.put("/:id/receipt/:idx", authenticate, async (req, res) => {
             await po.save();
             broadcast({ type: "DATA_UPDATED", path: "pos" });
           }
+          if (ACCOUNTS_ENTRY_STATUSES.includes(newPoStatus)) await ensureAccountEntry(po);
         }
       }
 
@@ -798,6 +808,7 @@ async function recomputeGrnPoStatus(poId) {
     await po.save({});
     broadcast({ type: "DATA_UPDATED", path: "pos" });
   }
+  if (ACCOUNTS_ENTRY_STATUSES.includes(newStatus)) await ensureAccountEntry(po);
 }
 __name(recomputeGrnPoStatus, "recomputeGrnPoStatus");
 
